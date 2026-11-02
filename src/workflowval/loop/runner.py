@@ -10,11 +10,12 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from workflowval.loop.stats import StatsCollector, append_history, read_history, suggest_max_steps
 from workflowval.loop.trace import Tracer
 from workflowval.models.base import Message, Model, ModelError, Reply, ToolCall, ToolSpec, Usage
 from workflowval.redact import redact_text
-from workflowval.schemas import Label, RunState, save_json
-from workflowval.tools import ROLE_TOOLS, Tool, ToolContext, ToolError
+from workflowval.schemas import Label, RunState, RunStats, save_json
+from workflowval.tools import ROLE_TOOLS, TOOLS, Tool, ToolContext, ToolError
 
 MAX_INVALID_RETRIES = 2
 PASSED = "passed"
@@ -73,11 +74,12 @@ class TestOutcome:
 
 @dataclass(frozen=True)
 class RoleStep:
-    """Run a role once on an instruction."""
+    """Run a role once. `workflow_id` credits its calls to that workflow in the stats."""
 
     name: str
     role: Role
     instruction: str
+    workflow_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,8 @@ class RunResult:
     detail: str
     tests: dict[str, str]
     state: RunState
+    stats: RunStats
+    suggestion: str | None = None
 
     @property
     def summary(self) -> str:
@@ -138,10 +142,11 @@ class RunResult:
         cost = f"${s.cost_usd:.4f}"
         if s.unpriced_calls:
             cost += f" (plus {s.unpriced_calls} calls with no known price)"
-        return (
+        line = (
             f"stopped: {self.stop_reason.value}; steps: {s.steps_used}; "
             f"tokens: {s.input_tokens} in, {s.output_tokens} out; cost: {cost}"
         )
+        return f"{line}\n{self.suggestion}" if self.suggestion else line
 
 
 class _Stop(Exception):
@@ -159,18 +164,37 @@ class RunContext:
     workdir: Path
     tracer: Tracer
     state: RunState = field(default_factory=RunState)
+    stats: StatsCollector = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.stats = StatsCollector(self.budget.max_steps, self.state.spec_hash)
 
     @property
     def state_path(self) -> Path:
         """Where checkpoints go."""
         return self.workdir / ".workflowval" / "state.json"
 
-    def checkpoint(self) -> None:
-        """Save the resume point."""
-        save_json(self.state, self.state_path)
+    @property
+    def stats_path(self) -> Path:
+        """This run's stats."""
+        return self.workdir / ".workflowval" / "stats.json"
 
-    def run_role(self, role: Role, instruction: str) -> str:
-        """Talk to a role until it answers without tool calls, and return that answer."""
+    @property
+    def history_path(self) -> Path:
+        """One line per finished run."""
+        return self.workdir / ".workflowval" / "stats_history.jsonl"
+
+    def checkpoint(self) -> None:
+        """Save the resume point and the stats so far."""
+        save_json(self.state, self.state_path)
+        save_json(self.stats.snapshot(), self.stats_path)
+
+    def run_role(self, role: Role, instruction: str, workflow_id: str | None = None) -> str:
+        """Talk to a role until it answers without tool calls, and return that answer.
+
+        With `workflow_id`, every call counts toward that workflow in the stats. Without it, each
+        tool call counts toward the workflow its arguments name, or else toward the run.
+        """
         messages = [
             Message("system", role.prompt),
             Message("user", instruction),
@@ -179,7 +203,8 @@ class RunContext:
         specs = [tool.spec() for tool in role.tools]
         invalid_streak = 0
         while True:
-            reply = self._call_model(role, messages, specs)
+            reply = self._call_model(role, messages, specs, workflow_id)
+            self.stats.record_reply(workflow_id, reply.tool_calls, {*TOOLS, *tools})
             messages.append(Message("assistant", reply.text, tool_calls=reply.tool_calls))
             if not reply.tool_calls:
                 return reply.text
@@ -195,13 +220,20 @@ class RunContext:
                     f"role {role.name} sent invalid tool calls {invalid_streak} times in a row",
                 )
 
-    def _call_model(self, role: Role, messages: list[Message], specs: list[ToolSpec]) -> Reply:
+    def _call_model(
+        self,
+        role: Role,
+        messages: list[Message],
+        specs: list[ToolSpec],
+        workflow_id: str | None,
+    ) -> Reply:
         if self.state.steps_used >= self.budget.max_steps:
             raise _Stop(StopReason.MAX_STEPS, f"used all {self.budget.max_steps} steps")
         self.state.steps_used += 1
         try:
             reply = role.model.complete(messages, specs)
         except ModelError as exc:
+            self.stats.record_failed_call(workflow_id)
             self.tracer.event("model_error", role=role.name, model=role.model.name, error=str(exc))
             raise _Stop(StopReason.MODEL_ERROR, str(exc)) from exc
         self._add_usage(reply.usage)
@@ -329,7 +361,7 @@ def _run_fix_loop(ctx: RunContext, step: FixLoop) -> None:
 
 def _run_step(ctx: RunContext, step: Step) -> None:
     if isinstance(step, RoleStep):
-        ctx.run_role(step.role, step.instruction)
+        ctx.run_role(step.role, step.instruction, step.workflow_id)
     elif isinstance(step, CodeStep):
         step.fn(ctx)
     elif isinstance(step, ReviewLoop):
@@ -364,7 +396,11 @@ def run(
         _close(ctx, test_id, Label.UNRESOLVED.value)
     ctx.state.stop_reason = reason.value
     ctx.checkpoint()
-    result = RunResult(reason, detail, dict(ctx.state.closed_tests), ctx.state)
+    stats = ctx.stats.snapshot(reason.value)
+    save_json(stats, ctx.stats_path)
+    append_history(stats, ctx.history_path)
+    suggestion = suggest_max_steps(read_history(ctx.history_path), budget.max_steps)
+    result = RunResult(reason, detail, dict(ctx.state.closed_tests), ctx.state, stats, suggestion)
     tracer.event(
         "run_end",
         stop_reason=reason.value,
@@ -374,5 +410,6 @@ def run(
         output_tokens=ctx.state.output_tokens,
         cost_usd=ctx.state.cost_usd,
         unpriced_calls=ctx.state.unpriced_calls,
+        suggestion=suggestion,
     )
     return result

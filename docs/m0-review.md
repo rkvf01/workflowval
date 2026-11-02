@@ -11,21 +11,33 @@ The requirements ask you to review the data formats before M1 starts. They live 
 | `benchmarks/seeded/labels.json` | `Labels` | `labels.py` |
 | auth config | `AuthConfig` | `auth.py` |
 | `.workflowval/state.json` | `RunState` | `state.py` |
+| `.workflowval/stats.json`, `stats_history.jsonl` | `RunStats` | `stats.py` |
 
 ## Decisions the requirements leave open
 
-M0 uses the proposal in each row. Tell me which to change.
+M0 uses the choice in each row. Rows marked "open" still need your decision.
 
-| # | Gap | M0 proposal |
-| --- | --- | --- |
-| 1 | `--max-steps` has no default | 200, where one step is one model call |
-| 2 | The `--ci` threshold for API_BUG and SPEC_DRIFT is undefined | `--ci-max-api-bugs` and `--ci-max-spec-drift`, both default 0 |
-| 3 | The Planner reviews generated tests and the Writer fixes them, but neither can read them | New `read_tests` tool for both |
-| 4 | The Reviewer labels failures, but no tool records a label | New `write_verdict` tool |
-| 5 | A CONFLICT report has extra fields compared with an API_BUG report | One `write_bug_report` tool with a `kind` field |
-| 6 | The workflow example can't send a request body | Optional `body` on steps and cleanup |
-| 7 | Workflows can't call a route unauthenticated, which the seeded "missing auth check" bug needs | `auth` on steps, default true |
-| 8 | The Planner must answer `review.json`, but no tool in its list reads it | Not added yet: the loop would pass the review in the Planner's instruction. Decide at M3 |
+| # | Gap | M0 choice | Status |
+| --- | --- | --- | --- |
+| 1 | `--max-steps` has no default | 200, where one step is one model call | Decided: keep 200 as the start, and learn from stats (below) |
+| 2 | The `--ci` threshold for API_BUG and SPEC_DRIFT is undefined | `--ci-max-api-bugs` and `--ci-max-spec-drift`, both default 0 | Decided: keep, default 0 |
+| 3 | The Planner reviews generated tests and the Writer fixes them, but neither can read them | New `read_tests` tool for both | Decided: keep |
+| 4 | The Reviewer labels failures, but no tool records a label | New `write_verdict` tool | Decided: keep |
+| 5 | A CONFLICT report has extra fields compared with an API_BUG report | One `write_bug_report` tool with a `kind` field | Open |
+| 6 | The workflow example can't send a request body | Optional `body` on steps and cleanup | Decided: keep |
+| 7 | Workflows can't call a route unauthenticated, which the seeded "missing auth check" bug needs | `auth` on steps, default true | Decided: keep |
+| 8 | The Planner must answer `review.json`, but no tool in its list reads it | Not added yet: the loop would pass the review in the Planner's instruction. Decide at M3 | Open |
+
+## Learning the step limit from stats
+
+Every run writes `.workflowval/stats.json`: model calls and tool calls per workflow, with tool names
+and counts only. Work that belongs to no single workflow goes under `run`. Each finished run also adds
+a line to `.workflowval/stats_history.jsonl`.
+
+After at least 5 usable runs, a run reports a suggested `--max-steps`, about 1.5 times the largest of
+the last 20 runs. If a recent run hit the current limit, it suggests 1.5 times that limit instead.
+Runs ended by a provider failure or invalid model output aren't counted, because they stopped early.
+The limit only changes if you change it.
 
 ## Rules added beyond the requirements
 

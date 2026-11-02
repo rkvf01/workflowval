@@ -17,6 +17,7 @@ from workflowval.schemas.results import (
 )
 from workflowval.schemas.review import Answer, Decision, MissingJourney, Review, WorkflowFix
 from workflowval.schemas.state import RunState
+from workflowval.schemas.stats import CallCounts, RunStats, StatsTotal
 from workflowval.schemas.workflow import Basis, CleanupStep, Expect, Source, Step, Workflow
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "BasicAuth",
     "Basis",
     "BearerAuth",
+    "CallCounts",
     "CleanupStep",
     "Confidence",
     "Decision",
@@ -41,8 +43,10 @@ __all__ = [
     "Review",
     "RunResults",
     "RunState",
+    "RunStats",
     "SeededBug",
     "Source",
+    "StatsTotal",
     "Step",
     "TestResult",
     "TestStatus",

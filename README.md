@@ -32,6 +32,12 @@ export ANTHROPIC_API_KEY=...
 uv run pytest -m live
 ```
 
+## Stats
+
+Every run writes tool and model call counts per workflow to `.workflowval/stats.json`, and adds a line
+to `.workflowval/stats_history.jsonl`. After 5 usable runs, the run summary suggests a `--max-steps`
+value based on that history. It never changes the limit by itself. See `docs/m0-review.md`.
+
 ## License
 
 MIT
