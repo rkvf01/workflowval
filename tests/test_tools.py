@@ -14,6 +14,7 @@ WORKFLOW = {
     "id": "wf",
     "source": "planner",
     "basis": "documented",
+    "rule": "Pets can be read back",
     "steps": [{"op": "getPet", "expect": {"status": 200}}],
 }
 ANSWER = {"decision": "rejected", "reason": "duplicate"}

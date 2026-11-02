@@ -47,7 +47,9 @@ The limit only changes if you change it.
 - `write_workflow` also refuses to overwrite a file it can't parse, since that might be a user's
   locked file with a typo, and refuses to create user-sourced or locked files.
 - A verdict on an `assumed` workflow can't have high confidence.
-- `rule` is optional, because a plain CRUD workflow may not check a business rule.
+- `rule` is required, and can't be blank: every workflow must state the business rule it checks.
+  The format can't tell whether every rule in the docs has a workflow. That's the job of the Planner
+  (M1) and the Reviewer's missing-journey check (M3).
 - A test still open when a budget stops the run is marked UNRESOLVED, so `--ci` fails on it.
 - The auth config for a login flow has `token_header` and `token_prefix`, since restful-booker
   uses `Cookie: token=<value>`.

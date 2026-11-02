@@ -94,6 +94,7 @@ WORKFLOW = Workflow.model_validate(
         "id": "a",
         "source": "planner",
         "basis": "assumed",
+        "rule": "r",
         "steps": [{"op": "o", "expect": {"status": 200}}],
     }
 )

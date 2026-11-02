@@ -139,9 +139,16 @@ def test_locked_refusal_reaches_the_model_and_does_not_count_as_invalid(tmp_path
     path = tmp_path / "workflows" / "wf.json"
     path.parent.mkdir()
     steps = [{"op": "o", "expect": {"status": 200}}]
-    locked = {"id": "wf", "source": "user", "basis": "documented", "locked": True, "steps": steps}
+    locked = {
+        "id": "wf",
+        "source": "user",
+        "basis": "documented",
+        "locked": True,
+        "rule": "r",
+        "steps": steps,
+    }
     path.write_text(json.dumps(locked))
-    attempt = {"id": "wf", "source": "planner", "basis": "assumed", "steps": steps}
+    attempt = {"id": "wf", "source": "planner", "basis": "assumed", "rule": "r", "steps": steps}
     model = FakeModel([call("write_workflow", workflow=attempt)] * 4 + [DONE])
     planner = make_role("planner", model)
     assert go([RoleStep("s", planner, "x")], tmp_path).stop_reason is StopReason.COMPLETED

@@ -34,6 +34,7 @@ WORKFLOW = {
     "id": "wf_a",
     "source": "planner",
     "basis": "documented",
+    "rule": "Pets can be read back",
     "steps": [{"op": "getPet", "expect": {"status": 200}}],
 }
 

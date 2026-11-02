@@ -75,6 +75,8 @@ def test_doc_example_round_trips_through_a_file(tmp_path: Path) -> None:
     ("changes", "message"),
     [
         ({"id": "../evil"}, "pattern"),
+        ({"rule": ""}, "rule"),
+        ({"rule": "   "}, "rule"),
         ({"id": "Mixed_Case"}, "pattern"),
         ({"source": "robot"}, "source"),
         ({"basis": "vibes"}, "basis"),
@@ -98,6 +100,13 @@ def test_doc_example_round_trips_through_a_file(tmp_path: Path) -> None:
 def test_invalid_workflows_are_rejected(changes: dict[str, Any], message: str) -> None:
     with pytest.raises(ValidationError, match=message):
         Workflow.model_validate(workflow(**changes))
+
+
+def test_every_workflow_must_state_its_rule() -> None:
+    data = workflow()
+    del data["rule"]
+    with pytest.raises(ValidationError, match="rule"):
+        Workflow.model_validate(data)
 
 
 def test_user_workflow_can_be_locked() -> None:

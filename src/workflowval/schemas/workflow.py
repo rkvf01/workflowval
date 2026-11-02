@@ -93,7 +93,10 @@ class Workflow(Strict):
     source: Source
     basis: Basis
     locked: bool = False
-    rule: str | None = Field(default=None, description="Business rule checked, and where it's from")
+    rule: str = Field(
+        pattern=r"\S",
+        description="The business rule this workflow checks, and where it comes from. Required.",
+    )
     steps: list[Step] = Field(min_length=1)
     cleanup: list[CleanupStep] = Field(default_factory=list)
 
