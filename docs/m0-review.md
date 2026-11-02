@@ -26,7 +26,7 @@ M0 uses the choice in each row. Rows marked "open" still need your decision.
 | 5 | A CONFLICT report has extra fields compared with an API_BUG report | One `write_bug_report` tool with a `kind` field | Decided: keep; a conflict must include its extra fields |
 | 6 | The workflow example can't send a request body | Optional `body` on steps and cleanup | Decided: keep |
 | 7 | Workflows can't call a route unauthenticated, which the seeded "missing auth check" bug needs | `auth` on steps, default true | Decided: keep |
-| 8 | The Planner must answer `review.json`, but no tool in its list reads it | Not added yet: the loop would pass the review in the Planner's instruction. Decide at M3 | Open |
+| 8 | The Planner must answer `review.json`, but no tool in its list reads it | No new tool: the loop passes the review in the Planner's instruction, built in M3 | Decided: loop passes it in |
 
 ## Learning the step limit from stats
 
