@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from workflowval.schemas import (
     Answer,
@@ -114,8 +114,19 @@ class WriteBugReportArgs(BaseModel):
     actual: str = Field(min_length=1)
     spec_reference: str = Field(min_length=1)
     docs_excerpt: str | None = Field(default=None, description="Required for a conflict")
-    affected_workflows: list[str] = Field(default_factory=list)
-    suggested_resolution: str | None = None
+    affected_workflows: list[str] = Field(
+        default_factory=list, description="Required for a conflict"
+    )
+    suggested_resolution: str | None = Field(default=None, description="Required for a conflict")
+
+    @model_validator(mode="after")
+    def _conflict_has_its_extra_fields(self) -> WriteBugReportArgs:
+        if self.kind == "conflict":
+            required = ("docs_excerpt", "affected_workflows", "suggested_resolution")
+            missing = [name for name in required if not getattr(self, name)]
+            if missing:
+                raise ValueError(f"a conflict report also needs: {', '.join(missing)}")
+        return self
 
 
 class JsonPatchOp(BaseModel):

@@ -43,6 +43,9 @@ SAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             "expected": "e",
             "actual": "a",
             "spec_reference": "s",
+            "docs_excerpt": "d",
+            "affected_workflows": ["wf"],
+            "suggested_resolution": "r",
         },
         {"kind": "other"},
     ),
@@ -186,3 +189,41 @@ def test_write_workflow_cannot_escape_the_workflows_folder(tmp_path: Path) -> No
     with pytest.raises(ValidationError):
         write(tmp_path, id="../../outside")
     assert not (tmp_path.parent / "outside.json").exists()
+
+
+BUG_REPORT: dict[str, Any] = {
+    "kind": "api_bug",
+    "title": "t",
+    "curl_steps": ["curl x"],
+    "expected": "e",
+    "actual": "a",
+    "spec_reference": "s",
+}
+CONFLICT_EXTRAS: dict[str, Any] = {
+    "docs_excerpt": "d",
+    "affected_workflows": ["wf"],
+    "suggested_resolution": "r",
+}
+
+
+def test_an_api_bug_report_does_not_need_the_conflict_fields(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match="arrives in"):
+        TOOLS["write_bug_report"].invoke(BUG_REPORT, context(tmp_path))
+
+
+@pytest.mark.parametrize("field", sorted(CONFLICT_EXTRAS))
+@pytest.mark.parametrize("blank", ["missing", "empty"])
+def test_a_conflict_report_needs_each_extra_field(field: str, blank: str, tmp_path: Path) -> None:
+    extras = dict(CONFLICT_EXTRAS)
+    if blank == "missing":
+        del extras[field]
+    else:
+        extras[field] = [] if field == "affected_workflows" else ""
+    arguments = {**BUG_REPORT, "kind": "conflict", **extras}
+    with pytest.raises(ValidationError, match=f"also needs: {field}"):
+        TOOLS["write_bug_report"].invoke(arguments, context(tmp_path))
+
+
+def test_a_conflict_report_names_every_missing_field(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="docs_excerpt, affected_workflows, suggested"):
+        TOOLS["write_bug_report"].invoke({**BUG_REPORT, "kind": "conflict"}, context(tmp_path))

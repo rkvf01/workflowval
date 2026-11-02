@@ -23,7 +23,7 @@ M0 uses the choice in each row. Rows marked "open" still need your decision.
 | 2 | The `--ci` threshold for API_BUG and SPEC_DRIFT is undefined | `--ci-max-api-bugs` and `--ci-max-spec-drift`, both default 0 | Decided: keep, default 0 |
 | 3 | The Planner reviews generated tests and the Writer fixes them, but neither can read them | New `read_tests` tool for both | Decided: keep |
 | 4 | The Reviewer labels failures, but no tool records a label | New `write_verdict` tool | Decided: keep |
-| 5 | A CONFLICT report has extra fields compared with an API_BUG report | One `write_bug_report` tool with a `kind` field | Open |
+| 5 | A CONFLICT report has extra fields compared with an API_BUG report | One `write_bug_report` tool with a `kind` field | Decided: keep; a conflict must include its extra fields |
 | 6 | The workflow example can't send a request body | Optional `body` on steps and cleanup | Decided: keep |
 | 7 | Workflows can't call a route unauthenticated, which the seeded "missing auth check" bug needs | `auth` on steps, default true | Decided: keep |
 | 8 | The Planner must answer `review.json`, but no tool in its list reads it | Not added yet: the loop would pass the review in the Planner's instruction. Decide at M3 | Open |
