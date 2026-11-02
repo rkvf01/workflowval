@@ -23,13 +23,13 @@ Unit tests use `FakeModel` and block network sockets, so they need no API key.
 
 Live runs go through LiteLLM. Pick a model with `--model provider/name` or `WORKFLOWVAL_MODEL`, and
 override per role with `--role-model writer=provider/name`. Provider keys come from environment
-variables only, for example `ANTHROPIC_API_KEY`. Local Ollama models (`ollama/<name>`) need no key.
+variables only, for example `OPENROUTER_API_KEY`. Local Ollama models (`ollama/<name>`) need no key.
 
-To check the adapter against a real provider (costs a fraction of a cent):
+To check the adapter against a real provider:
 
 ```
-export ANTHROPIC_API_KEY=...
-uv run pytest -m live
+export OPENROUTER_API_KEY=...
+WORKFLOWVAL_LIVE_MODEL=openrouter/<vendor>/<model> uv run pytest -m live
 ```
 
 ## Stats

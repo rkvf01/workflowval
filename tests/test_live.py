@@ -1,4 +1,7 @@
-"""One real provider call, to prove the adapter end to end. Run with: uv run pytest -m live"""
+"""One real provider call, to prove the adapter end to end.
+
+Run with: WORKFLOWVAL_LIVE_MODEL=provider/name uv run pytest -m live
+"""
 
 from __future__ import annotations
 
@@ -10,7 +13,7 @@ from workflowval.models import LiteLLMModel, Message, ToolSpec
 
 pytestmark = [pytest.mark.live, pytest.mark.enable_socket]
 
-MODEL = os.environ.get("WORKFLOWVAL_LIVE_MODEL", "openrouter/vendor/model")
+MODEL = os.environ.get("WORKFLOWVAL_LIVE_MODEL", "")
 
 ADD = ToolSpec(
     "add",
@@ -23,10 +26,7 @@ ADD = ToolSpec(
 )
 
 
-@pytest.mark.skipif(
-    MODEL.startswith("anthropic/") and not os.environ.get("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY is not set",
-)
+@pytest.mark.skipif(not MODEL, reason="WORKFLOWVAL_LIVE_MODEL is not set")
 def test_a_real_model_can_call_a_tool() -> None:
     reply = LiteLLMModel(MODEL).complete(
         [Message("user", "Use the add tool to add 2 and 3.")],
