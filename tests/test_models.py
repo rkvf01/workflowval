@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import litellm
+import pytest
+
+from workflowval.models import (
+    FakeModel,
+    FakeScriptExhausted,
+    LiteLLMModel,
+    Message,
+    ModelError,
+    Reply,
+    ToolCall,
+    ToolSpec,
+    Usage,
+    call,
+)
+
+SPEC = ToolSpec("read_spec", "Read it.", {"type": "object", "properties": {}})
+
+
+def test_fake_replays_in_order_and_records_requests() -> None:
+    fake = FakeModel([Reply(text="one"), call("read_spec", operation_id="x")])
+    assert fake.complete([Message("user", "hi")], [SPEC]).text == "one"
+    second = fake.complete([], [])
+    assert second.tool_calls[0].arguments == {"operation_id": "x"}
+    assert fake.requests[0] == ([Message("user", "hi")], [SPEC])
+
+
+def test_fake_fails_clearly_when_the_script_runs_out() -> None:
+    fake = FakeModel([Reply()])
+    fake.complete([], [])
+    with pytest.raises(FakeScriptExhausted, match="after 1 replies"):
+        fake.complete([], [])
+
+
+def test_fake_loads_a_script_from_a_file(tmp_path: Path) -> None:
+    path = tmp_path / "script.json"
+    script = [
+        {"text": "hi", "usage": {"input_tokens": 3, "output_tokens": 4, "cost_usd": 0.5}},
+        {"tool_calls": [{"id": "1", "name": "read_spec", "arguments": {"a": 1}}]},
+    ]
+    path.write_text(json.dumps(script))
+    fake = FakeModel.from_file(path)
+    assert fake.complete([], []).usage == Usage(3, 4, 0.5)
+    assert fake.complete([], []).tool_calls == (ToolCall("1", "read_spec", {"a": 1}),)
+
+
+def wire_response(content: str | None = "ok", tool_calls: list[Any] | None = None) -> Any:
+    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message)],
+        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+    )
+
+
+def wire_call(arguments: str) -> Any:
+    return SimpleNamespace(id="c1", function=SimpleNamespace(name="read_spec", arguments=arguments))
+
+
+@pytest.fixture
+def sent(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    captured: dict[str, Any] = {"response": wire_response()}
+
+    def completion(**params: Any) -> Any:
+        captured["params"] = params
+        return captured["response"]
+
+    monkeypatch.setattr(litellm, "completion", completion)
+    monkeypatch.setattr(litellm, "completion_cost", lambda completion_response: 0.25)
+    return captured
+
+
+def test_adapter_sends_provider_neutral_requests(sent: dict[str, Any]) -> None:
+    earlier = ToolCall("c0", "read_spec", {"operation_id": "x"})
+    LiteLLMModel("anthropic/some-model", temperature=0.5, seed=7, extra={"top_p": 0.9}).complete(
+        [
+            Message("system", "be good"),
+            Message("assistant", "", tool_calls=(earlier,)),
+            Message("tool", "result", tool_call_id="c0"),
+        ],
+        [SPEC],
+    )
+    params = sent["params"]
+    assert params["model"] == "anthropic/some-model"
+    assert (params["temperature"], params["seed"], params["top_p"]) == (0.5, 7, 0.9)
+    assert params["drop_params"] is True
+    assert params["tools"][0]["function"]["name"] == "read_spec"
+    assert params["messages"][1]["tool_calls"][0]["function"] == {
+        "name": "read_spec",
+        "arguments": '{"operation_id": "x"}',
+    }
+    assert params["messages"][2]["tool_call_id"] == "c0"
+
+
+def test_adapter_leaves_out_unset_options(sent: dict[str, Any]) -> None:
+    LiteLLMModel("ollama/x").complete([Message("user", "hi")], [])
+    assert not {"temperature", "seed", "tools"} & set(sent["params"])
+
+
+def test_adapter_maps_reply_usage_and_cost(sent: dict[str, Any]) -> None:
+    sent["response"] = wire_response(None, [wire_call('{"operation_id": "x"}')])
+    reply = LiteLLMModel("a/b").complete([], [])
+    assert reply.text == ""
+    assert reply.tool_calls == (ToolCall("c1", "read_spec", {"operation_id": "x"}),)
+    assert reply.usage == Usage(11, 7, 0.25)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"), [("{not json", "not valid JSON"), ("[1]", "JSON object")]
+)
+def test_adapter_reports_malformed_arguments_rather_than_crashing(
+    sent: dict[str, Any], arguments: str, message: str
+) -> None:
+    sent["response"] = wire_response(None, [wire_call(arguments)])
+    tool_call = LiteLLMModel("a/b").complete([], []).tool_calls[0]
+    assert tool_call.parse_error is not None
+    assert message in tool_call.parse_error
+
+
+def test_adapter_treats_empty_arguments_as_no_arguments(sent: dict[str, Any]) -> None:
+    sent["response"] = wire_response(None, [wire_call("")])
+    assert LiteLLMModel("a/b").complete([], []).tool_calls[0].arguments == {}
+
+
+def test_adapter_tolerates_a_model_with_no_known_price(
+    sent: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unpriced(completion_response: Any) -> float:
+        raise ValueError("model isn't mapped")
+
+    monkeypatch.setattr(litellm, "completion_cost", unpriced)
+    usage = LiteLLMModel("a/b").complete([], []).usage
+    assert usage.cost_usd is None
+    assert usage.input_tokens == 11
+
+
+def test_provider_errors_are_wrapped_and_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(**_: Any) -> Any:
+        raise RuntimeError("401 for Authorization: Bearer abc123def456")
+
+    monkeypatch.setattr(litellm, "completion", fail)
+    with pytest.raises(ModelError) as caught:
+        LiteLLMModel("a/b").complete([], [])
+    assert "abc123def456" not in str(caught.value)
+    assert "RuntimeError" in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+def test_adapter_handles_real_litellm_objects_offline() -> None:
+    # mock_response goes through LiteLLM's own request and response code without any network.
+    tool_calls = [
+        {"id": "c1", "type": "function", "function": {"name": "read_spec", "arguments": '{"a": 1}'}}
+    ]
+    model = LiteLLMModel(
+        "openrouter/vendor/model",
+        temperature=0.0,
+        seed=1,
+        extra={"mock_response": "hello", "mock_tool_calls": tool_calls, "api_key": "unused"},
+    )
+    reply = model.complete(
+        [
+            Message("system", "s"),
+            Message("user", "u"),
+            Message("assistant", "", tool_calls=(ToolCall("c0", "read_spec", {"a": 0}),)),
+            Message("tool", "r", tool_call_id="c0"),
+        ],
+        [SPEC],
+    )
+    assert reply.text == "hello"
+    assert reply.tool_calls == (ToolCall("c1", "read_spec", {"a": 1}),)
+    assert reply.usage.input_tokens > 0
+    assert reply.usage.output_tokens > 0
