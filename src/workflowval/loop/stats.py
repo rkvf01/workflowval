@@ -135,7 +135,8 @@ def suggest_max_steps(history: Iterable[RunStats], limit: int) -> str | None:
     target = max(_one_and_a_half_times(largest), MIN_SUGGESTED_LIMIT)
     if target == limit:
         return None
+    steps = "step" if largest == 1 else "steps"
     return (
-        f"the largest of your last {len(usable)} runs used {largest} step{'s' if largest != 1 else ''}; "
+        f"the largest of your last {len(usable)} runs used {largest} {steps}; "
         f"consider --max-steps {target}"
     )
