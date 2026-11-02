@@ -50,6 +50,9 @@ The limit only changes if you change it.
 - `rule` is required, and can't be blank: every workflow must state the business rule it checks.
   The format can't tell whether every rule in the docs has a workflow. That's the job of the Planner
   (M1) and the Reviewer's missing-journey check (M3).
+- The agents create rules as they write workflows, with or without docs, and there is no separate
+  rule list. Failure cases are rules too (for example, "An order with quantity 0 is rejected with
+  422"). The M1 Planner prompt must say both.
 - A test still open when a budget stops the run is marked UNRESOLVED, so `--ci` fails on it.
 - The auth config for a login flow has `token_header` and `token_prefix`, since restful-booker
   uses `Cookie: token=<value>`.
