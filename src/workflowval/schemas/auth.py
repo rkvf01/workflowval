@@ -38,16 +38,17 @@ class BasicAuth(Strict):
 class LoginAuth(Strict):
     """Call a login operation, extract a token, reuse it and refresh it on 401.
 
-    The header and prefix are configurable because not every API uses `Authorization: Bearer`:
-    restful-booker expects `Cookie: token=<value>`.
+    Leave `token_header` and `token_prefix` out and the agent works out how to send the token, from
+    the spec's security section, then the docs, then the login response and what the API accepts.
+    Values set here always win. The agent never sees the secret values.
     """
 
     type: Literal["login"]
     op: str = Field(min_length=1, description="Login operationId")
     body_env: dict[str, EnvVarName] = Field(description="Request body field to env var name")
     token_path: str = Field(pattern=r"^\$", description="JSONPath of the token in the response")
-    token_header: str = "Authorization"  # noqa: S105
-    token_prefix: str = "Bearer "  # noqa: S105
+    token_header: str | None = Field(default=None, description="Override, e.g. Cookie")
+    token_prefix: str | None = Field(default=None, description="Override, e.g. token=")
     refresh_on_401: bool = True
 
 

@@ -54,5 +54,21 @@ The limit only changes if you change it.
   rule list. Failure cases are rules too (for example, "An order with quantity 0 is rejected with
   422"). The M1 Planner prompt must say both.
 - A test still open when a budget stops the run is marked UNRESOLVED, so `--ci` fails on it.
-- The auth config for a login flow has `token_header` and `token_prefix`, since restful-booker
-  uses `Cookie: token=<value>`.
+- A rule stated explicitly in the spec has `basis: "documented"`. A rule an agent inferred has
+  `basis: "assumed"`. A failure on an assumed rule is lowered to medium confidence by the loop in M2,
+  and `results.json` rejects high as a backstop.
+- Unknown fields are rejected in the workflow file's own structure. `body` and `params` are sent as
+  written, so a test can deliberately send bad values or unknown fields.
+- For login auth, the agent decides how to send the token, from the spec's security section, then
+  the docs, then the login response and what the API accepts. `token_header` and `token_prefix` are
+  optional overrides. The agent never sees secret values.
+
+## Decisions for later milestones
+
+- **CI (M2, M3):** failures on `assumed` rules count toward `--ci-max-api-bugs` and
+  `--ci-max-spec-drift` the same as any other. With the default of 0, one wrong guess fails the build.
+  Raise the thresholds if that proves too noisy.
+- **Stopping (M1):** a failing test never stops the run. A major problem, such as the API being
+  unreachable, stops it with a clear reason, so failures aren't mislabeled as bugs.
+
+**Review closed 2026-11-02.** Starting M1 needs your go-ahead.

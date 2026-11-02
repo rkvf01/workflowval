@@ -239,13 +239,18 @@ def test_auth_config_refuses_literal_secrets_and_bad_shapes(scheme: dict[str, An
         AuthConfig.model_validate({"scheme": scheme})
 
 
-def test_login_defaults_to_bearer_and_refresh() -> None:
+def test_login_leaves_token_style_to_the_agent_unless_overridden() -> None:
     login = LoginAuth(type="login", op="o", body_env={}, token_path="$.t")
-    assert (login.token_header, login.token_prefix, login.refresh_on_401) == (
-        "Authorization",
-        "Bearer ",
-        True,
+    assert (login.token_header, login.token_prefix, login.refresh_on_401) == (None, None, True)
+    override = LoginAuth(
+        type="login",
+        op="o",
+        body_env={},
+        token_path="$.t",
+        token_header="Cookie",
+        token_prefix="t=",
     )
+    assert (override.token_header, override.token_prefix) == ("Cookie", "t=")
 
 
 def test_state_round_trips_and_rejects_unknown_versions(tmp_path: Path) -> None:
