@@ -25,6 +25,7 @@ if AUTH and AUTH.get("type") == "api_key" and AUTH["location"] == "header":
 
 _secrets: set[str] = set()
 _exchanges: list[httpx.Response] = []
+_MAX_RAW_BODY = 200_000
 _recording = True
 _results: dict[str, dict[str, Any]] = {}
 _steps_run = 0
@@ -160,7 +161,9 @@ class Api:
         options: dict[str, Any] = {"params": params, "headers": request_headers}
         if body is not None:
             options["json"] = body
-        return client.request(method, BASE_URL + url, **options)
+        return client.request(
+            method, BASE_URL + url, extensions={"workflowval_template": template}, **options
+        )
 
     def known_issue(self, reason: str) -> None:
         """Note that this test has a failure already reviewed as real."""
@@ -243,6 +246,16 @@ def _exchange(response: httpx.Response) -> dict[str, Any]:
     }
 
 
+def _call(response: httpx.Response) -> dict[str, Any]:
+    """One request and its whole response, for checking against the spec."""
+    return {
+        **_exchange(response),
+        "template": response.request.extensions.get("workflowval_template"),
+        "content_type": response.headers.get("content-type"),
+        "raw_body": _mask(response.content.decode("utf-8", errors="replace"))[:_MAX_RAW_BODY],
+    }
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     """Record each test's outcome and its last 3 HTTP exchanges."""
     if report.when == "call" or report.outcome == "failed":
@@ -254,6 +267,7 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
             "failing_assertion": _mask(message) if report.failed else None,
             "stdout": _mask(report.capstdout),
             "exchanges": [_exchange(response) for response in _exchanges[-3:]],
+            "calls": [_call(response) for response in _exchanges],
             "steps_run": _steps_run,
             "known_issue": _mask(_known_issue) if _known_issue else None,
         }

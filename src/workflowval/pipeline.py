@@ -38,6 +38,7 @@ from workflowval.schemas import (
     AuthConfig,
     Confidence,
     Evidence,
+    Finding,
     HttpExchange,
     KnownIssue,
     Label,
@@ -52,15 +53,33 @@ from workflowval.schemas import (
     load_json,
     save_json,
 )
-from workflowval.spec import SpecGraph, build_graph, load_spec, resolve_base_url, spec_hash
+from workflowval.spec import (
+    ResponseChecker,
+    SpecGraph,
+    build_graph,
+    load_raw_spec,
+    load_spec,
+    resolve_base_url,
+    spec_hash,
+)
 from workflowval.testrun import Outcome, is_reachable, run_tests, test_id
 from workflowval.tools import ToolContext
-from workflowval.triage import StoredVerdict, label_failures, read_verdicts
+from workflowval.triage import (
+    MismatchGroup,
+    StoredVerdict,
+    call_mismatches,
+    classify,
+    group_mismatches,
+    label_failures,
+    read_verdicts,
+    review_finding,
+)
 
 PLANNER_TOOLS = frozenset({"read_spec", "read_docs", "read_workflows", "write_workflow"})
 REVIEWER_TOOLS = frozenset(
     {"read_spec", "read_docs", "read_workflows", "read_results", "write_verdict"}
 )
+MAX_REVIEWED_FINDINGS = 20
 EXPECTABLE_LABELS = frozenset({"API_BUG", "SPEC_DRIFT", "CONFLICT"})
 WRITER_TOOLS = frozenset(
     {"read_spec", "read_workflows", "read_results", "read_tests", "write_test"}
@@ -167,9 +186,13 @@ def _failure_text(outcome: Outcome) -> str:
 class _Session:
     """State the pipeline's steps share within one run."""
 
-    def __init__(self, config: TestConfig, graph: SpecGraph, base_url: str) -> None:
+    def __init__(
+        self, config: TestConfig, graph: SpecGraph, base_url: str, checker: ResponseChecker
+    ) -> None:
         self.config = config
         self.graph = graph
+        self.checker = checker
+        self.findings: list[Finding] = []
         self.base_url = base_url
         self.workdir = config.workdir
         self.outcomes: dict[str, Outcome] = {}
@@ -212,7 +235,13 @@ class _Session:
             self.outcomes[test_id(outcome.workflow_id)] = outcome
         atomic_write_text(
             self.workdir / ".workflowval" / "last_results.json",
-            json.dumps({key: vars(value) for key, value in self.outcomes.items()}, default=str),
+            json.dumps(
+                {
+                    key: {name: item for name, item in vars(value).items() if name != "calls"}
+                    for key, value in self.outcomes.items()
+                },
+                default=str,
+            ),
         )
         return [
             TestOutcome(
@@ -223,10 +252,42 @@ class _Session:
             for o in outcomes
         ]
 
-    def label(self, ctx: RunContext, failures: Sequence[TestOutcome]) -> Mapping[str, Label]:
+    @property
+    def credentials(self) -> str:
         scheme = self.config.auth.scheme if self.config.auth else None
-        credentials = scheme.type if scheme else "none, so requests carry no credentials"
-        return label_failures(ctx, self.reviewer, failures, credentials)
+        return scheme.type if scheme else "none, so requests carry no credentials"
+
+    def _hint(self, outcome: Outcome) -> str:
+        last = outcome.calls[-1] if outcome.calls else {}
+        status = last.get("status")
+        mismatches = [m.message for m in call_mismatches(last, self.checker)] if last else []
+        return classify(status if isinstance(status, int) else None, mismatches)
+
+    def label(self, ctx: RunContext, failures: Sequence[TestOutcome]) -> Mapping[str, Label]:
+        hints = {
+            failure.test_id: self._hint(self.outcomes[failure.test_id])
+            for failure in failures
+            if failure.test_id in self.outcomes
+        }
+        return label_failures(ctx, self.reviewer, failures, self.credentials, hints)
+
+    def review_mismatches(self, ctx: RunContext) -> None:
+        """Have the Reviewer rule once on each distinct way responses broke the spec."""
+        calls = {key: outcome.calls for key, outcome in self.outcomes.items()}
+        groups = group_mismatches(calls, self.checker, self.graph)
+        reviewed = groups[:MAX_REVIEWED_FINDINGS]
+        for group in groups:
+            self.findings.append(_unreviewed_finding(group))
+        for index, group in enumerate(reviewed):
+            verdict = review_finding(ctx, self.reviewer, group, self.credentials)
+            if verdict is not None:
+                self.findings[index] = _unreviewed_finding(group).model_copy(
+                    update={
+                        "label": verdict.label,
+                        "confidence": Confidence(verdict.confidence),
+                        "reason": verdict.reason,
+                    }
+                )
 
     def fix(self, ctx: RunContext, failure: TestOutcome) -> None:
         verdict = read_verdicts(self.workdir)[failure.test_id]
@@ -304,6 +365,15 @@ class _Session:
                 self._save_and_render(workflow.model_copy(update={"known_issue": None}))
 
 
+def _unreviewed_finding(group: MismatchGroup) -> Finding:
+    return Finding(
+        id=group.finding_id,
+        message=group.message,
+        operations=sorted(group.operations),
+        tests=sorted(group.tests),
+    )
+
+
 def _expected_verdict(issue: KnownIssue, outcome: Outcome) -> Verdict:
     return Verdict(
         label=Label(issue.label),
@@ -370,6 +440,7 @@ def _build_results(session: _Session, run_result: RunResult) -> RunResults:
         stop_reason=run_result.stop_reason.value,
         stop_detail=run_result.detail or None,
         tests=tests,
+        findings=session.findings,
         input_tokens=state.input_tokens,
         output_tokens=state.output_tokens,
         cost_usd=state.cost_usd,
@@ -394,7 +465,8 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
     graph = build_graph(spec)
     current_hash = spec_hash(spec)
     base_url = resolve_base_url(config.base_url, graph)
-    session = _Session(config, graph, base_url)
+    checker = ResponseChecker(load_raw_spec(config.spec_source))
+    session = _Session(config, graph, base_url, checker)
     session.needs_planning = _needs_planning(config, current_hash)
     # Each run reports only its own expectation changes and verdicts.
     state_dir = config.workdir / ".workflowval"
@@ -407,6 +479,7 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
             CodeStep("render_tests", session.render_tests),
             FixLoop("test_and_fix", session.execute, session.label, session.fix),
             CodeStep("update_known_issues", session.update_known_issues),
+            CodeStep("review_mismatches", session.review_mismatches),
         ]
     result = run(
         Pipeline(tuple(steps)),

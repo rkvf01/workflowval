@@ -99,6 +99,8 @@ def _make_handler(api: ItemsApi) -> type[BaseHTTPRequestHandler]:
         def _send(self, status: int, payload: Any = None) -> None:
             body = b"" if payload is None else json.dumps(payload).encode()
             self.send_response(status)
+            if payload is not None:
+                self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

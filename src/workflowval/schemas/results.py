@@ -95,6 +95,23 @@ class Verdict(Strict):
     )
 
 
+class Finding(Strict):
+    """A response that breaks the spec, once however many tests saw it (FR-8, FR-10).
+
+    `label` is None until the Reviewer rules on it. `TEST_BUG` means it ruled this isn't a real
+    problem, for example a spec that's merely loose.
+    """
+
+    id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    operations: list[str] = Field(default_factory=list)
+    tests: list[str] = Field(default_factory=list)
+    label: Label | None = None
+    confidence: Confidence | None = None
+    reason: str | None = None
+    action: Action = Field(default_factory=lambda: Action(kind=ActionKind.NONE))
+
+
 class TestResult(Strict):
     """The result of one test, keeping the last 3 HTTP exchanges (FR-6)."""
 
@@ -128,6 +145,7 @@ class RunResults(Strict):
     stop_reason: str
     stop_detail: str | None = None
     tests: list[TestResult] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
     uncovered_operations: list[str] = Field(
         default_factory=list, description="Spec operations no workflow calls"
     )
@@ -154,6 +172,9 @@ class RunResults(Strict):
         failed = len(self.tests) - passed - sum(expected.values())
         if failed:
             parts.append(f"{failed} failed")
+        confirmed = sum(f.label not in {None, Label.TEST_BUG} for f in self.findings)
+        if confirmed:
+            parts.append(f"{confirmed} spec mismatch{'es' if confirmed > 1 else ''}")
         return ", ".join(parts)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -161,4 +182,5 @@ class RunResults(Strict):
     def label_counts(self) -> dict[str, int]:
         """Number of tests per label."""
         labels = [t.verdict.label.value for t in self.tests if t.verdict is not None]
+        labels += [f.label.value for f in self.findings if f.label not in {None, Label.TEST_BUG}]
         return dict(Counter(labels))

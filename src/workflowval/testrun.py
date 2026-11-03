@@ -31,6 +31,7 @@ class Outcome:
     failing_assertion: str | None = None
     stdout: str = ""
     exchanges: list[dict[str, Any]] = field(default_factory=list)
+    calls: list[dict[str, Any]] = field(default_factory=list)
     steps_run: int = 0
     known_issue: str | None = None
 

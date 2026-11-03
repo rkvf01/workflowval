@@ -16,8 +16,6 @@ import workflowval
 from workflowval.prompts import load_prompt, prompt_version
 from workflowval.report import write_reports
 from workflowval.schemas import RunResults
-from workflowval.spec import validate_response
-from workflowval.triage import classify
 
 SOURCE = Path(workflowval.__file__).parent
 PROVIDER_LIBRARIES = {
@@ -111,8 +109,6 @@ def test_style_rules_live_in_one_place() -> None:
 @pytest.mark.parametrize(
     ("call", "milestone"),
     [
-        (lambda: validate_response("op", None), "M2"),
-        (lambda: classify(None), "M2"),  # type: ignore[arg-type]
         (lambda: write_reports(RunResults(stop_reason="completed")), "M2"),
     ],
 )

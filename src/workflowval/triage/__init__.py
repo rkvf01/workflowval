@@ -1,22 +1,77 @@
-"""Failure labeling by the Reviewer role (FR-8). Deterministic checks arrive in M2."""
+"""Failure labeling: deterministic checks, then the Reviewer role decides (FR-8)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from workflowval.loop import Role, RunContext, TestOutcome
 from workflowval.loop.stats import workflow_of
 from workflowval.prompts import render_prompt
-from workflowval.schemas import Label, TestResult, Verdict
+from workflowval.schemas import Label
+from workflowval.spec import ResponseChecker, SpecGraph, SpecMismatch
 
 
-def classify(failure: TestResult) -> Verdict:
-    """Run the deterministic checks on one failure before any model sees it."""
-    raise NotImplementedError("triage.classify arrives in M2")
+def classify(status: int | None, mismatches: Sequence[str]) -> str:
+    """Run the deterministic checks on a failure. This is a hint: the Reviewer decides the label."""
+    if status is not None and status >= 500:
+        return f"the API returned {status}, so this is likely an API_BUG"
+    if mismatches:
+        return "the response breaks the spec, so this is likely SPEC_DRIFT: " + "; ".join(
+            mismatches
+        )
+    return "no automatic signal"
+
+
+@dataclass
+class MismatchGroup:
+    """One way responses break the spec, with every test and operation that showed it."""
+
+    key: str
+    message: str
+    operations: set[str] = field(default_factory=set)
+    tests: set[str] = field(default_factory=set)
+    example: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def finding_id(self) -> str:
+        """A stable id for this mismatch, used as the key of its verdict."""
+        digest = hashlib.sha256(self.key.encode()).hexdigest()[:10]
+        return f"finding:{digest}"
+
+
+def call_mismatches(call: Mapping[str, Any], checker: ResponseChecker) -> list[SpecMismatch]:
+    """Check one recorded call. A 5xx is an API failure, so its body says nothing about drift."""
+    template, status = call.get("template"), call.get("status")
+    if not isinstance(template, str) or not isinstance(status, int) or status >= 500:
+        return []
+    body = str(call.get("raw_body") or "").encode()
+    return checker.check(str(call["method"]), template, status, call.get("content_type"), body)
+
+
+def group_mismatches(
+    outcomes: Mapping[str, Sequence[Mapping[str, Any]]], checker: ResponseChecker, graph: SpecGraph
+) -> list[MismatchGroup]:
+    """Group mismatches across tests, so a bug seen by every test is reviewed once."""
+    groups: dict[tuple[str, int], MismatchGroup] = {}
+    for test_id, calls in sorted(outcomes.items()):
+        for call in calls:
+            for mismatch in call_mismatches(call, checker):
+                operation = graph.operation_at(str(call["method"]), str(call["template"]))
+                name = operation.operation_id if operation else str(call["template"])
+                # The same field can mean different things under different statuses.
+                group = groups.setdefault(
+                    (mismatch.key, int(call["status"])),
+                    MismatchGroup(f"{mismatch.key}|{call['status']}", mismatch.message),
+                )
+                group.operations.add(name)
+                group.tests.add(test_id)
+                group.example = group.example or dict(call)
+    return [groups[key] for key in sorted(groups)]
 
 
 @dataclass(frozen=True)
@@ -56,7 +111,11 @@ def _forget(workdir: Path, test_id: str) -> None:
 
 
 def label_failures(
-    ctx: RunContext, reviewer: Role, failures: Sequence[TestOutcome], credentials: str
+    ctx: RunContext,
+    reviewer: Role,
+    failures: Sequence[TestOutcome],
+    credentials: str,
+    hints: Mapping[str, str] | None = None,
 ) -> Mapping[str, Label]:
     """Ask the Reviewer to judge each failure against the spec and docs, one at a time.
 
@@ -74,6 +133,7 @@ def label_failures(
                 workflow_id=workflow_id or "",
                 failure=failure.message,
                 credentials=credentials,
+                hint=(hints or {}).get(failure.test_id, "no automatic signal"),
             ),
             workflow_id,
         )
@@ -81,3 +141,29 @@ def label_failures(
         if verdict is not None:
             labels[failure.test_id] = verdict.label
     return labels
+
+
+def review_finding(
+    ctx: RunContext, reviewer: Role, group: MismatchGroup, credentials: str
+) -> StoredVerdict | None:
+    """Ask the Reviewer to rule on one mismatch. No recorded verdict leaves it unreviewed."""
+    example = group.example
+    pointer = (
+        "/paths/"
+        + str(example.get("template", "")).replace("~", "~0").replace("/", "~1")
+        + f"/{str(example.get('method', '')).lower()}/responses/{example.get('status')}"
+    )
+    ctx.run_role(
+        reviewer,
+        render_prompt(
+            "task_finding",
+            finding_id=group.finding_id,
+            message=group.message,
+            operations=", ".join(sorted(group.operations)),
+            status=str(example.get("status")),
+            body=str(example.get("raw_body") or "")[:1500],
+            pointer=pointer,
+            credentials=credentials,
+        ),
+    )
+    return read_verdicts(ctx.workdir).get(group.finding_id)
