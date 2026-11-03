@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from workflowval.loop import Budget
 from workflowval.models import FakeModel, Reply, call
 from workflowval.pipeline import TestConfig, run_test_pipeline
 from workflowval.schemas import Label, RunResults
@@ -191,6 +192,7 @@ def _config(tmp_path: Path, url: str, reviewer: list[Reply]) -> TestConfig:
             "reviewer": FakeModel(reviewer),
             "writer": FakeModel([]),
         },
+        budget=Budget(max_review_rounds=0),
     )
 
 

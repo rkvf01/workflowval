@@ -57,6 +57,7 @@ class Review(Strict):
     """One review round's output."""
 
     round: int = Field(ge=1)
+    after_tests: bool = Field(default=False, description="True if it followed a test run")
     fixes: list[WorkflowFix] = Field(default_factory=list)
     missing_journeys: list[MissingJourney] = Field(default_factory=list)
 
@@ -73,3 +74,21 @@ class Review(Strict):
 
     def _items(self) -> list[WorkflowFix | MissingJourney]:
         return [*self.fixes, *self.missing_journeys]
+
+    def items(self) -> list[WorkflowFix | MissingJourney]:
+        """Every fix and journey in this round."""
+        return self._items()
+
+
+class ReviewLog(Strict):
+    """`review.json`: every round, so nothing proposed is ever dropped."""
+
+    rounds: list[Review] = Field(default_factory=list)
+
+    def item(self, item_id: str) -> WorkflowFix | MissingJourney | None:
+        """Find an item in any round."""
+        return next((i for r in self.rounds for i in r.items() if i.id == item_id), None)
+
+    def unanswered(self) -> list[str]:
+        """Ids of items the Planner has not answered yet, in any round."""
+        return [item_id for review in self.rounds for item_id in review.unanswered()]

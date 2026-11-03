@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -208,9 +209,12 @@ def config(
     reviewer: list[Reply] | None = None,
     writer: list[Reply] | None = None,
     specification: dict[str, Any] | None = None,
+    review_rounds: int = 0,
     **options: Any,
 ) -> TestConfig:
     path = workdir / "openapi.json"
+    budget = options.pop("budget", Budget())
+    options["budget"] = replace(budget, max_review_rounds=review_rounds)
     if not path.exists() or specification:
         path.write_text(json.dumps(specification or spec()))
     return TestConfig(
@@ -363,7 +367,7 @@ def test_plan_only_stops_after_workflow_files(items_api: ItemsApi, tmp_path: Pat
     report = run_test_pipeline(config(items_api, tmp_path, PLANNED, plan_only=True))
     assert (tmp_path / "workflows" / "item_lifecycle.json").is_file()
     assert not (tmp_path / "tests").exists()
-    assert report.run.state.completed_steps == ["plan"]
+    assert report.run.state.completed_steps == ["plan", "review_plan"]
 
 
 def test_user_edits_are_kept_and_the_test_regenerated_without_replanning(
@@ -682,6 +686,8 @@ runner = CliRunner()
 
 def invoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> Any:
     monkeypatch.chdir(tmp_path)
+    if args[0] in {"test", "plan"} and "--max-review-rounds" not in args:
+        args = [*args, "--max-review-rounds", "0"]
     return runner.invoke(cli.app, args)
 
 
@@ -1376,3 +1382,197 @@ def test_cli_shows_a_task_that_hit_its_limit(
 def test_normal_tasks_never_see_the_limit(items_api: ItemsApi, tmp_path: Path) -> None:
     report = run_test_pipeline(config(items_api, tmp_path, PLANNED))
     assert report.results.tasks_stopped == []
+
+
+def journey(item_id: str = "j1", **changes: Any) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "user": "a customer",
+        "steps": ["create", "read"],
+        "rule": "A customer can read what they made",
+        "basis": "documented",
+        **changes,
+    }
+
+
+def review_call(*journeys: dict[str, Any], **changes: Any) -> Reply:
+    return call("write_review", review={"round": 1, "missing_journeys": list(journeys), **changes})
+
+
+NOTHING = review_call()
+ACCEPT = {"decision": "accepted", "workflow_id": "item_journey"}
+
+
+def new_workflow(**changes: Any) -> dict[str, Any]:
+    return lifecycle(
+        id="item_journey",
+        source="reviewer",
+        steps=[lifecycle()["steps"][0]],
+        **changes,
+    )
+
+
+JOURNEY_ID = "tests/wf/test_item_journey.py::test_item_journey"
+
+
+def review_file(tmp_path: Path) -> dict[str, Any]:
+    review: dict[str, Any] = json.loads((tmp_path / "review.json").read_text())
+    return review
+
+
+def test_no_review_rounds_means_no_review(items_api: ItemsApi, tmp_path: Path) -> None:
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    assert not (tmp_path / "review.json").exists()
+    assert report.results.reviews == []
+
+
+def test_a_journey_found_before_the_tests_becomes_a_tested_workflow(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    planner = [
+        *PLANNED,
+        call("write_workflow", workflow=new_workflow()),
+        call("answer_review", item_id="j1", answer=ACCEPT),
+        DONE,
+    ]
+    reviewer = [review_call(journey()), DONE]
+    report = run_test_pipeline(config(items_api, tmp_path, planner, reviewer, review_rounds=1))
+    assert report.run.tests == {TEST_ID: "passed", JOURNEY_ID: "passed"}
+    saved = review_file(tmp_path)["rounds"][0]
+    assert saved["after_tests"] is False
+    assert saved["missing_journeys"][0]["answer"]["workflow_id"] == "item_journey"
+    assert "added as `item_journey`" in (tmp_path / "reports" / "report.md").read_text()
+
+
+def test_two_rounds_review_before_and_after_the_tests(items_api: ItemsApi, tmp_path: Path) -> None:
+    reviewer = [NOTHING, DONE, NOTHING, DONE]
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, reviewer, review_rounds=2))
+    assert report.run.state.review_rounds == 2, "an empty first round doesn't end the review"
+    assert [r.after_tests for r in report.results.reviews] == [False, True]
+
+
+def test_one_round_is_spent_before_the_tests(items_api: ItemsApi, tmp_path: Path) -> None:
+    report = run_test_pipeline(
+        config(items_api, tmp_path, PLANNED, [NOTHING, DONE], review_rounds=1)
+    )
+    assert [r.after_tests for r in report.results.reviews] == [False]
+
+
+def test_the_review_after_the_tests_sees_how_far_each_test_got_and_what_is_broken(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    reviewer = FakeModel([NOTHING, DONE, verdict("API_BUG"), DONE, DONE, NOTHING, DONE])
+    built = config(items_api, tmp_path, PLANNED, review_rounds=2)
+    built = replace(built, models={**built.models, "reviewer": reviewer})
+    run_test_pipeline(built)
+    instruction = reviewer.requests[5][0][1].content
+    assert "It xfailed, and ran 2 of 3 steps." in instruction
+    assert "item_lifecycle (API_BUG): reason for API_BUG" in instruction
+
+
+def test_a_new_test_runs_after_the_review_and_the_old_ones_stay_as_they_are(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    planner = [
+        *PLANNED,
+        call("write_workflow", workflow=lifecycle(rule="changed")),
+        call("write_workflow", workflow=new_workflow()),
+        call("answer_review", item_id="j1", answer=ACCEPT),
+        DONE,
+    ]
+    reviewer = [
+        NOTHING,
+        DONE,
+        verdict("API_BUG"),
+        DONE,
+        DONE,
+        review_call(journey()),
+        DONE,
+        NOTHING,
+        DONE,
+    ]
+    report = run_test_pipeline(config(items_api, tmp_path, planner, reviewer, review_rounds=3))
+    statuses = {t.workflow_id: t.status.value for t in report.results.tests}
+    assert statuses == {"item_lifecycle": "xfailed", "item_journey": "passed"}
+    assert read_workflow(tmp_path)["rule"] == lifecycle()["rule"], "the rewrite must be refused"
+
+
+def test_a_fix_proposed_after_the_tests_is_refused(items_api: ItemsApi, tmp_path: Path) -> None:
+    fix = {"id": "f1", "workflow_id": "item_lifecycle", "reason": "too strict"}
+    reviewer = [NOTHING, DONE, review_call(fixes=[fix]), DONE]
+    run_test_pipeline(config(items_api, tmp_path, PLANNED, reviewer, review_rounds=2))
+    saved = review_file(tmp_path)["rounds"][1]["fixes"][0]["answer"]
+    assert saved["decision"] == "rejected"
+    assert "stay as they are" in saved["reason"]
+
+
+def test_an_item_the_planner_ignores_is_recorded_as_rejected(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    reviewer = [review_call(journey()), DONE]
+    run_test_pipeline(
+        config(items_api, tmp_path, [*PLANNED, DONE, DONE], reviewer, review_rounds=1)
+    )
+    answer = review_file(tmp_path)["rounds"][0]["missing_journeys"][0]["answer"]
+    assert answer == {"decision": "rejected", "reason": "The Planner gave no answer."}
+
+
+def test_a_planner_that_stops_early_gets_one_more_chance(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    planner = [
+        *PLANNED,
+        DONE,
+        call("write_workflow", workflow=new_workflow()),
+        call("answer_review", item_id="j1", answer=ACCEPT),
+        DONE,
+    ]
+    report = run_test_pipeline(
+        config(items_api, tmp_path, planner, [review_call(journey()), DONE], review_rounds=1)
+    )
+    assert JOURNEY_ID in report.run.tests
+
+
+def test_a_reviewer_that_records_nothing_ends_the_round_cleanly(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, [DONE, DONE], review_rounds=2))
+    assert report.run.stop_reason is StopReason.COMPLETED
+    assert report.results.reviews == []
+
+
+def test_a_stuck_reviewer_cannot_stop_the_tests(items_api: ItemsApi, tmp_path: Path) -> None:
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, endless(), review_rounds=1))
+    assert report.run.tests == {TEST_ID: "passed"}
+    assert report.results.tasks_stopped == ["reviewer, run: stopped at 20 calls"]
+
+
+def test_a_second_run_with_the_same_spec_reviews_nothing(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    run_test_pipeline(
+        config(items_api, tmp_path, PLANNED, [NOTHING, DONE, NOTHING, DONE], review_rounds=2)
+    )
+    report = run_test_pipeline(config(items_api, tmp_path, review_rounds=2))
+    assert report.run.state.steps_used == 0
+
+
+def test_two_failures_with_one_root_cause_are_filed_once_across_rounds(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    report_call = call(
+        "write_bug_report",
+        kind="api_bug",
+        title="Once",
+        test_id=TEST_ID,
+        expected="200",
+        actual="500",
+        spec_reference="getItem",
+    )
+    reviewer = [NOTHING, DONE, verdict("API_BUG"), DONE, report_call, DONE, NOTHING, DONE]
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, reviewer, review_rounds=2))
+    assert len(list((tmp_path / "reports" / "bugs").glob("*.md"))) == 1
+    assert report.results.tests[0].status.value == "xfailed"

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -26,26 +27,30 @@ from workflowval.loop import (
     RunResult,
     StopReason,
     StopRun,
+    TaskLimitReached,
     TestOutcome,
     make_role,
     run,
 )
 from workflowval.models import Model
-from workflowval.planner import load_workflows, plan, uncovered_operations
+from workflowval.planner import load_workflows, plan, plan_call_limit, uncovered_operations
 from workflowval.prompts import render_prompt
 from workflowval.report import write_reports
 from workflowval.schemas import (
     Action,
     ActionKind,
+    Answer,
     AuthConfig,
     Basis,
     Confidence,
+    Decision,
     Evidence,
     Finding,
     HttpExchange,
     KnownIssue,
     Label,
     LoginAuth,
+    ReviewLog,
     RunResults,
     RunState,
     TestResult,
@@ -83,6 +88,12 @@ from workflowval.triage import (
 PLANNER_TOOLS = frozenset({"read_spec", "read_docs", "read_workflows", "write_workflow"})
 REVIEWER_TOOLS = frozenset(
     {"read_spec", "read_docs", "read_workflows", "read_results", "write_verdict"}
+)
+REVIEW_TOOLS = frozenset(
+    {"read_spec", "read_docs", "read_workflows", "read_results", "write_review"}
+)
+ANSWER_TOOLS = frozenset(
+    {"read_spec", "read_docs", "read_workflows", "write_workflow", "answer_review"}
 )
 REPORT_TOOLS = frozenset({"read_spec", "read_docs", "write_bug_report", "propose_spec_patch"})
 MAX_REVIEWED_FINDINGS = 20
@@ -211,6 +222,10 @@ class _Session:
         self.planner = make_role("planner", config.models["planner"], PLANNER_TOOLS)
         self.reviewer = make_role("reviewer", config.models["reviewer"], REVIEWER_TOOLS)
         self.reporter = make_role("reviewer", config.models["reviewer"], REPORT_TOOLS)
+        self.plan_reviewer = make_role("reviewer", config.models["reviewer"], REVIEW_TOOLS)
+        self.answerer = make_role("planner", config.models["planner"], ANSWER_TOOLS)
+        self.review_finished = False
+        self.filed: set[str] = set()
         self.writer = make_role("writer", config.models["writer"], WRITER_TOOLS)
 
     def plan_step(self, ctx: RunContext) -> None:
@@ -218,6 +233,112 @@ class _Session:
             return
         if not plan(ctx, self.planner, self.graph, self.login_operations):
             raise StopRun(StopReason.INVALID_OUTPUT, "the Planner wrote no workflows")
+
+    def _review_log(self) -> ReviewLog:
+        path = self.workdir / "review.json"
+        return load_json(ReviewLog, path) if path.is_file() else ReviewLog()
+
+    def _review_round(self, ctx: RunContext, instruction: str, *, after_tests: bool) -> bool:
+        """Run one review round and get every item answered. True if it proposed anything."""
+        if ctx.state.review_rounds >= ctx.budget.max_review_rounds or ctx.tool_context is None:
+            return False
+        ctx.state.review_rounds += 1
+        rounds_before = len(self._review_log().rounds)
+        ctx.tool_context = replace(ctx.tool_context, new_workflows_only=after_tests)
+        try:
+            with contextlib.suppress(TaskLimitReached):
+                ctx.run_role(self.plan_reviewer, instruction)
+            log = self._review_log()
+            if len(log.rounds) == rounds_before or not log.rounds[-1].items():
+                return False
+            note = (
+                "Tests that have run can't change, so give each workflow a new id."
+                if after_tests
+                else ""
+            )
+            for _ in range(2):  # A model can stop early, so it gets one more chance.
+                open_ids = set(self._review_log().unanswered())
+                if not open_ids:
+                    break
+                items = [
+                    item.model_dump(exclude_none=True)
+                    for item in self._review_log().rounds[-1].items()
+                    if item.id in open_ids
+                ]
+                with contextlib.suppress(TaskLimitReached):
+                    ctx.run_role(
+                        self.answerer,
+                        render_prompt(
+                            "task_answer_review", items=json.dumps(items, indent=1), note=note
+                        ),
+                        max_calls=plan_call_limit(self.graph),
+                    )
+            self._reject_unanswered()
+            return True
+        finally:
+            ctx.tool_context = replace(ctx.tool_context, new_workflows_only=False)
+            ctx.checkpoint()
+
+    def _reject_unanswered(self) -> None:
+        """Nothing is dropped silently, so an item the Planner left open is recorded as such."""
+        log = self._review_log()
+        refusal = Answer(decision=Decision.REJECTED, reason="The Planner gave no answer.")
+        for review in log.rounds:
+            for item in review.items():
+                if item.answer is None:
+                    item.answer = refusal
+        save_json(log, self.workdir / "review.json")
+
+    def review_plan(self, ctx: RunContext) -> None:
+        """Review the plan before any test runs, keeping a round for after them if possible."""
+        if not self.needs_planning:
+            return
+        rounds = ctx.budget.max_review_rounds
+        before_tests = rounds if self.config.plan_only else max(rounds - 1, min(rounds, 1))
+        for _ in range(before_tests):
+            instruction = render_prompt("task_review_plan")
+            if not self._review_round(ctx, instruction, after_tests=False):
+                return
+
+    def _how_far(self, workflow: Workflow) -> str:
+        outcome = self.outcomes.get(test_id(workflow.id))
+        if outcome is None:
+            return f"- {workflow.id}: {workflow.rule}. It hasn't run."
+        return (
+            f"- {workflow.id}: {workflow.rule}. It {outcome.status}, and ran "
+            f"{outcome.steps_run} of {len(workflow.steps)} steps."
+        )
+
+    def review_results(self, ctx: RunContext) -> None:
+        """Look for what the tests never reached, and add new tests. Existing ones don't change."""
+        if not self.needs_planning or self.review_finished:
+            return
+        workflows = load_workflows(self.workdir)
+        known = [
+            f"- {workflow.id} ({workflow.known_issue.label}): {workflow.known_issue.reason}"
+            for workflow in workflows
+            if workflow.known_issue is not None
+        ]
+        known += [
+            f"- {group.message}, on {', '.join(sorted(group.operations))}"
+            for group in group_mismatches(
+                {key: outcome.calls for key, outcome in self.outcomes.items()},
+                self.checker,
+                self.graph,
+            )
+        ]
+        instruction = render_prompt(
+            "task_review_results",
+            results="\n".join(self._how_far(workflow) for workflow in workflows),
+            known="\n".join(known) or "none",
+        )
+        if not self._review_round(ctx, instruction, after_tests=True):
+            self.review_finished = True
+
+    def pending_tests(self, ctx: RunContext) -> frozenset[str]:
+        """Tests with no final result yet: all of them at first, then only new ones."""
+        ids = {test_id(workflow.id) for workflow in load_workflows(self.workdir)}
+        return frozenset(ids - set(ctx.state.closed_tests))
 
     def render_tests(self, ctx: RunContext) -> None:
         atomic_write_text(
@@ -311,6 +432,9 @@ class _Session:
             verdict = verdicts.get(key)
             if status not in EXPECTABLE_LABELS or outcome is None or verdict is None:
                 continue
+            if key in self.filed:
+                continue
+            self.filed.add(key)
             if not outcome.calls:
                 continue
             last = outcome.calls[-1]
@@ -559,6 +683,7 @@ def _build_results(session: _Session, run_result: RunResult) -> RunResults:
         stop_detail=run_result.detail or None,
         tests=tests,
         findings=session.findings,
+        reviews=session._review_log().rounds,
         tasks_stopped=state.tasks_stopped,
         input_tokens=state.input_tokens,
         output_tokens=state.output_tokens,
@@ -668,13 +793,35 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
     (state_dir / "last_results.json").unlink(missing_ok=True)
     (state_dir / "evidence.json").unlink(missing_ok=True)
     (state_dir / "reports.json").unlink(missing_ok=True)
-    steps: list[CodeStep | FixLoop] = [CodeStep("plan", session.plan_step)]
+    if session.needs_planning:
+        (config.workdir / "review.json").unlink(missing_ok=True)
+    steps: list[CodeStep | FixLoop] = [
+        CodeStep("plan", session.plan_step),
+        CodeStep("review_plan", session.review_plan),
+    ]
     if not config.plan_only:
         steps += [
             CodeStep("render_tests", session.render_tests),
             FixLoop("test_and_fix", session.execute, session.label, session.fix),
             CodeStep("write_failure_files", session.write_failure_files),
             CodeStep("update_known_issues", session.update_known_issues),
+        ]
+        # Rounds left after the first review each look for what the tests never reached.
+        for index in range(config.budget.max_review_rounds):
+            steps += [
+                CodeStep(f"review_results_{index}", session.review_results),
+                CodeStep(f"render_new_tests_{index}", session.render_tests),
+                FixLoop(
+                    f"test_new_{index}",
+                    session.execute,
+                    session.label,
+                    session.fix,
+                    session.pending_tests,
+                ),
+                CodeStep(f"write_new_failure_files_{index}", session.write_failure_files),
+                CodeStep(f"update_new_known_issues_{index}", session.update_known_issues),
+            ]
+        steps += [
             CodeStep("review_mismatches", session.review_mismatches),
         ]
     result = run(

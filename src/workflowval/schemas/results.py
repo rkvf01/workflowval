@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import Field, computed_field, model_validator
 
 from workflowval.schemas._base import Strict
+from workflowval.schemas.review import Review
 from workflowval.schemas.workflow import Basis
 
 
@@ -146,6 +147,7 @@ class RunResults(Strict):
     stop_detail: str | None = None
     tests: list[TestResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
+    reviews: list[Review] = Field(default_factory=list)
     tasks_stopped: list[str] = Field(
         default_factory=list,
         description="Tasks that hit their call limit, so may be incomplete",

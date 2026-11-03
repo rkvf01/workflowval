@@ -56,7 +56,7 @@ SAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
         {"test_id": "t", "patch": []},
     ),
 }
-STUBS = sorted({"write_review", "answer_review", "run_tests", "http_probe"})
+STUBS = sorted({"run_tests", "http_probe"})
 
 
 def context(tmp_path: Path) -> ToolContext:
@@ -127,7 +127,7 @@ def test_tool_rejects_invalid_arguments(name: str, tmp_path: Path) -> None:
 def test_stub_tool_accepts_valid_arguments_and_names_its_milestone(
     name: str, tmp_path: Path
 ) -> None:
-    with pytest.raises(ToolError, match=r"arrives in M[123]"):
+    with pytest.raises(ToolError, match="arrives in a later release"):
         TOOLS[name].invoke(SAMPLES[name][0], context(tmp_path))
 
 
@@ -517,3 +517,51 @@ def test_a_model_cannot_mark_a_failure_as_expected(tmp_path: Path) -> None:
     write(tmp_path, known_issue=issue)
     saved = next((tmp_path / "workflows").glob("*.json")).read_text()
     assert "known_issue" not in saved
+
+
+REVIEW = {
+    "round": 5,
+    "missing_journeys": [
+        {"id": "j1", "user": "u", "steps": ["s"], "rule": "r", "basis": "assumed"},
+    ],
+}
+
+
+def test_write_review_appends_a_numbered_round(tmp_path: Path) -> None:
+    TOOLS["write_review"].invoke({"review": REVIEW}, context(tmp_path))
+    second = {**REVIEW, "missing_journeys": [{**REVIEW["missing_journeys"][0], "id": "j2"}]}
+    TOOLS["write_review"].invoke({"review": second}, context(tmp_path))
+    rounds = json.loads((tmp_path / "review.json").read_text())["rounds"]
+    assert [review["round"] for review in rounds] == [1, 2]
+
+
+def test_write_review_refuses_an_id_used_earlier(tmp_path: Path) -> None:
+    TOOLS["write_review"].invoke({"review": REVIEW}, context(tmp_path))
+    with pytest.raises(ToolError, match="earlier round"):
+        TOOLS["write_review"].invoke({"review": REVIEW}, context(tmp_path))
+
+
+def test_answer_review_needs_a_real_item_and_a_real_workflow(tmp_path: Path) -> None:
+    TOOLS["write_review"].invoke({"review": REVIEW}, context(tmp_path))
+    accept = {"decision": "accepted", "workflow_id": "nope"}
+    with pytest.raises(ToolError, match="no review item"):
+        TOOLS["answer_review"].invoke({"item_id": "x", "answer": accept}, context(tmp_path))
+    with pytest.raises(ToolError, match="write it first"):
+        TOOLS["answer_review"].invoke({"item_id": "j1", "answer": accept}, context(tmp_path))
+
+
+def test_answer_review_records_a_rejection(tmp_path: Path) -> None:
+    TOOLS["write_review"].invoke({"review": REVIEW}, context(tmp_path))
+    answer = {"decision": "rejected", "reason": "can't be tested"}
+    TOOLS["answer_review"].invoke({"item_id": "j1", "answer": answer}, context(tmp_path))
+    rounds = json.loads((tmp_path / "review.json").read_text())["rounds"]
+    assert rounds[0]["missing_journeys"][0]["answer"]["reason"] == "can't be tested"
+
+
+def test_after_the_tests_write_workflow_only_creates_new_files(tmp_path: Path) -> None:
+    write(tmp_path)
+    locked_in = ToolContext(tmp_path, new_workflows_only=True)
+    with pytest.raises(ToolError, match="stay as they are"):
+        TOOLS["write_workflow"].invoke({"workflow": WORKFLOW}, locked_in)
+    other = {**WORKFLOW, "id": "brand_new"}
+    assert "wrote" in TOOLS["write_workflow"].invoke({"workflow": other}, locked_in)
