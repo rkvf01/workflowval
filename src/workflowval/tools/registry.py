@@ -470,25 +470,34 @@ def write_bug_report(args: WriteBugReportArgs, context: ToolContext) -> str:
     evidence = _evidence(context, args.test_id)
     steps = "\n".join(curl_steps(evidence["calls"], context.auth))
     tests = "\n".join(f"- `{test}`" for test in evidence.get("tests", [args.test_id]))
-    sections = [
+    # The curl steps are masked already, and redacting them would hide the env vars they rely on.
+    before = [
         f"# {args.title}",
         f"**Kind:** {args.kind}",
         f"## Tests that show it\n\n{tests}",
-        f"## Steps to reproduce\n\n```\n{steps}\n```",
+    ]
+    after = [
         f"## Expected\n\n{args.expected}",
         f"## Actual\n\n{args.actual}",
         f"## Spec reference\n\n{args.spec_reference}",
     ]
     if args.kind == "conflict":
         workflows = "\n".join(f"- `{workflow}`" for workflow in args.affected_workflows)
-        sections += [
+        after += [
             f"## What the docs say\n\n{args.docs_excerpt}",
             f"## Affected workflows\n\n{workflows}",
             f"## Suggested resolution\n\n{args.suggested_resolution}",
         ]
+    text = "\n\n".join(
+        [
+            redact_text("\n\n".join(before)),
+            f"## Steps to reproduce\n\n```\n{steps}\n```",
+            redact_text("\n\n".join(after)),
+        ]
+    )
     path = _reports_dir(context) / "bugs" / f"{_slug(args.title)}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, redact_text("\n\n".join(sections)) + "\n")
+    atomic_write_text(path, text + "\n")
     return f"wrote {_record_report(context, args.test_id, path)}"
 
 

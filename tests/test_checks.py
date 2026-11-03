@@ -246,7 +246,7 @@ def test_drift_in_a_passing_test_is_reviewed_once_and_the_run_still_passes(
         folder = tmp_path / "workflows"
         folder.mkdir(exist_ok=True)
         (folder / f"{name}.json").write_text(json.dumps(workflow))
-    group_id = MismatchGroup("$: 'id' is a required property|200", "m").finding_id
+    group_id = MismatchGroup("'id' is a required property", "m").finding_id
     verdict = call(
         "write_verdict",
         test_id=group_id,
@@ -271,3 +271,23 @@ def test_drift_in_a_passing_test_is_reviewed_once_and_the_run_still_passes(
     assert results.summary() == "2 passed, 1 spec mismatch"
     saved = json.loads((tmp_path / "results.json").read_text())
     assert saved["findings"][0]["reason"] == "the field was renamed"
+
+
+def test_one_schema_problem_in_a_list_and_under_another_status_is_one_group(
+    checker: ResponseChecker,
+) -> None:
+    graph = build_graph(load_spec(str(SEEDED / "openapi.json")))
+    created = recorded(True)
+    read = {**created, "status": 200, "template": "/orders/{order_id}", "method": "GET"}
+    page = {"items": [json.loads(created["raw_body"])], "page": 1, "page_size": 20, "total": 1}
+    listed = {
+        **created,
+        "status": 200,
+        "template": "/orders",
+        "method": "GET",
+        "raw_body": json.dumps(page),
+    }
+    groups = group_mismatches({"t": [created, read, listed]}, checker, graph)
+    assert len(groups) == 2, [group.key for group in groups]
+    for group in groups:
+        assert group.operations == {"createOrder", "getOrder", "listOrders"}

@@ -54,6 +54,26 @@ EVIDENCE = {
 NOT_A_DETECTION = frozenset({"TEST_BUG"})
 
 
+def _last_status(exchanges: list[dict[str, Any]]) -> int | None:
+    return exchanges[-1].get("status") if exchanges else None
+
+
+def _creates(exchanges: list[dict[str, Any]]) -> int:
+    return sum(
+        e.get("method") == "POST" and str(e.get("url", "")).endswith("/orders") for e in exchanges
+    )
+
+
+# For bugs that words alone can't prove: what the recorded traffic must show. A test that stopped
+# early for another reason never reached the bug, even if its reason mentions the same words.
+TRAFFIC: dict[str, Callable[[list[dict[str, Any]]], bool]] = {
+    "wrong_validation_status": lambda e: _last_status(e) == 400,
+    "pagination_off_by_one": lambda e: bool(e) and "page=" in str(e[-1].get("url", "")),
+    "idempotency_ignored": lambda e: _creates(e) >= 2,
+    "empty_filter_500": lambda e: (_last_status(e) or 0) >= 500,
+}
+
+
 def _ops(workflow: dict[str, Any]) -> list[str]:
     return [step["op"] for step in workflow["steps"]]
 
@@ -141,6 +161,7 @@ class Item:
     operations: frozenset[str]
     text: str
     report: str | None
+    exchanges: tuple[dict[str, Any], ...] = ()
 
 
 def _items(results: dict[str, Any], workflows: Iterable[dict[str, Any]]) -> list[Item]:
@@ -151,9 +172,12 @@ def _items(results: dict[str, Any], workflows: Iterable[dict[str, Any]]) -> list
         if verdict is None:
             continue
         workflow = by_id.get(test["workflow_id"], {"steps": [], "rule": ""})
-        text = " ".join([workflow["rule"], verdict["reason"], test.get("failing_assertion") or ""])
+        # Only what was found counts. A workflow's rule says what it set out to check, and a test
+        # can fail for another reason before it gets that far.
+        text = " ".join([verdict["reason"], test.get("failing_assertion") or ""])
         report = (verdict.get("action") or {}).get("path")
-        items.append(Item(verdict["label"], frozenset(_ops(workflow)), text, report))
+        exchanges = tuple(test.get("exchanges") or ())
+        items.append(Item(verdict["label"], frozenset(_ops(workflow)), text, report, exchanges))
     for finding in results.get("findings", []):
         if finding.get("label"):
             text = f"{finding['message']} {finding.get('reason') or ''}"
@@ -165,6 +189,7 @@ def _items(results: dict[str, Any], workflows: Iterable[dict[str, Any]]) -> list
 def _matching(bug: dict[str, Any], items: Iterable[Item]) -> list[Item]:
     pattern = re.compile(EVIDENCE[bug["id"]], re.IGNORECASE)
     is_conflict = bug["expected_label"] == "CONFLICT"
+    traffic = TRAFFIC.get(bug["id"], lambda _: True)
     return [
         item
         for item in items
@@ -173,6 +198,7 @@ def _matching(bug: dict[str, Any], items: Iterable[Item]) -> list[Item]:
         and (is_conflict or item.label != "CONFLICT")
         and item.operations & set(bug["operations"])
         and pattern.search(item.text)
+        and traffic(list(item.exchanges))
     ]
 
 

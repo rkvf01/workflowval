@@ -128,6 +128,8 @@ def test_a_bug_report_has_every_section_and_is_recorded(tmp_path: Path) -> None:
         assert needed in text
     assert "`t1`" in text
     assert "`t2`" in text
+    assert '-H "authorization: Bearer $MY_TOKEN"' in text, "the steps must run as written"
+    assert MASK not in text
     written = json.loads((tmp_path / ".workflowval" / "reports.json").read_text())
     assert written == {"t1": str(path)}
 
@@ -244,7 +246,7 @@ def test_a_patch_is_refused_when_the_response_already_fits(tmp_path: Path) -> No
 def test_a_patch_can_target_one_of_several_mismatches(tmp_path: Path) -> None:
     both = {**ORDER, "created_at": "11/03/2026"}
     observed = {**OBSERVED, "raw_body": json.dumps(both)}
-    key = "$: 'total_cents' is a required property"
+    key = "'total_cents' is a required property"
     ctx = context(tmp_path, f1={"calls": [observed], "keys": [key]})
     result = TOOLS["propose_spec_patch"].invoke({"test_id": "f1", "patch": RENAME}, ctx)
     assert "wrote" in result

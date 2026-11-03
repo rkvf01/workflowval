@@ -1260,7 +1260,7 @@ def test_cli_drift_reports_a_confirmed_mismatch_and_exits_non_zero(
     created = changed["paths"]["/items"]["post"]["responses"]["201"]["content"]["application/json"]
     created["schema"]["required"] = ["missing_field"]
     (tmp_path / "openapi.json").write_text(json.dumps(changed))
-    group = MismatchGroup("$: 'missing_field' is a required property|201", "m")
+    group = MismatchGroup("'missing_field' is a required property", "m")
     ruling = call(
         "write_verdict",
         test_id=group.finding_id,
@@ -1268,8 +1268,7 @@ def test_cli_drift_reports_a_confirmed_mismatch_and_exits_non_zero(
         confidence="med",
         reason="the API lost a field",
     )
-    # The schema is shared, so two responses show this. Only one ruling is scripted.
-    scripted(reviewer=[ruling, DONE, DONE, DONE])
+    scripted(reviewer=[ruling, DONE, DONE])
     result = invoke(tmp_path, monkeypatch, drift_args(items_api.url))
     assert result.exit_code == cli.EXIT_FAILURES, result.output
     assert "MISMATCH    API_BUG" in result.output

@@ -12,7 +12,8 @@ workflowval run tests/wf
 ```
 
 Expect some failures labeled `API_BUG`. This image returns 500 for `POST /pet` with no `id`, so any test
-that creates a pet that way fails. See "Demo results" in `docs/m1-notes.md`.
+that creates a pet that way fails. After review, these count as expected, so `run` exits 0. See "Demo
+results" in `docs/m1-notes.md`.
 
 ## Restful-booker
 
@@ -27,3 +28,13 @@ workflowval run tests/wf --auth examples/restful-booker/auth.json
 ```
 
 `run` needs `--auth` here too, or tests that log in fail because they don't get the login env vars.
+
+## Seeded-bug app
+
+```
+WORKFLOWVAL_MODEL=provider/name uv run python benchmarks/run_benchmark.py --rounds 3 --limit 2
+```
+
+This starts the app itself, runs both builds and prints a table. It keeps total spending in
+`.benchmark/spend.jsonl`, across calls, and won't start a run that could pass `--limit`. See
+`benchmarks/seeded/README.md`.

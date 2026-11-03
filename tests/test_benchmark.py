@@ -28,10 +28,13 @@ def step(op: str, **extra: Any) -> dict[str, Any]:
     return {"op": op, "expect": {"status": 200}, **extra}
 
 
-def failing(name: str, label: str, reason: str, status: str = "xfailed") -> dict[str, Any]:
+def failing(
+    name: str, label: str, reason: str, status: str = "xfailed", http: int = 400
+) -> dict[str, Any]:
     return {
         "workflow_id": name,
         "status": status,
+        "exchanges": [{"method": "POST", "url": "http://h/orders", "status": http}],
         "verdict": {"label": label, "reason": reason, "action": {"path": f"reports/{name}.md"}},
     }
 
@@ -227,3 +230,34 @@ def test_the_table_shows_median_range_and_target() -> None:
 
 def test_a_benchmark_folder_is_kept_out_of_git() -> None:
     assert ".benchmark/" in (ROOT.parent / ".gitignore").read_text()
+
+
+def test_a_workflows_rule_alone_is_not_a_detection() -> None:
+    flow = workflow("i", step("createOrder"), rule="A retry with an idempotency key is safe")
+    run = results(failing("i", "SPEC_DRIFT", "total_cents was renamed"))
+    scored = bench.score_buggy(run, [flow], LABELS)
+    assert not bug(scored, "idempotency_ignored")["detected"]
+    assert bug(scored, "field_renamed")["detected"]
+
+
+def test_words_without_the_failing_traffic_are_not_a_detection() -> None:
+    flow = workflow("q", step("listOrders"), step("createOrder"))
+    run = results(
+        failing(
+            "q", "API_BUG", "the filter was empty, a retry made a duplicate, quantity", http=201
+        )
+    )
+    scored = bench.score_buggy(run, [flow], LABELS)
+    assert not bug(scored, "empty_filter_500")["detected"]
+    assert not bug(scored, "idempotency_ignored")["detected"]
+    assert not bug(scored, "wrong_validation_status")["detected"]
+
+
+def test_the_failing_traffic_with_the_words_is_a_detection() -> None:
+    flow = workflow("q", step("listOrders"))
+    run = results(failing("q", "API_BUG", "the filter returned 500", http=500))
+    assert bug(bench.score_buggy(run, [flow], LABELS), "empty_filter_500")["correct"]
+    created = {"method": "POST", "url": "http://h/orders", "status": 201}
+    retry = {**failing("r", "API_BUG", "a retry made a duplicate"), "exchanges": [created, created]}
+    other = workflow("r", step("createOrder"))
+    assert bug(bench.score_buggy(results(retry), [other], LABELS), "idempotency_ignored")["correct"]

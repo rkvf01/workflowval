@@ -46,17 +46,17 @@ def _schema_errors(exc: BaseException) -> list[Any]:
 
 
 def _from_schema_error(error: Any) -> SpecMismatch:
-    path = "$" + "".join(
-        "[]" if isinstance(part, int) else f".{part}" for part in error.absolute_path
-    )
+    parts = list(error.absolute_path)
+    path = "$" + "".join("[]" if isinstance(part, int) else f".{part}" for part in parts)
     message = str(error.message)
-    # Messages quote the bad value, which varies, so the key uses the rule that was broken. A
-    # missing field's name is in its message.
+    # The key must be the same wherever one schema shows up, in a list or under another status, and
+    # whatever the bad value was. So it uses the field's name and the rule broken, not the path.
     if error.validator == "required":
-        shape = message
-    else:
-        shape = f"{error.validator} {error.validator_value!r}"[:_MAX_MESSAGE]
-    return SpecMismatch(f"{path}: {shape}", f"{path}: {message}"[:_MAX_MESSAGE])
+        return SpecMismatch(message, f"{path}: {message}"[:_MAX_MESSAGE])
+    names = [part for part in parts if not isinstance(part, int)]
+    field = names[-1] if names else "$"
+    shape = f"{field}: {error.validator} {error.validator_value!r}"[:_MAX_MESSAGE]
+    return SpecMismatch(shape, f"{path}: {message}"[:_MAX_MESSAGE])
 
 
 class ResponseChecker:

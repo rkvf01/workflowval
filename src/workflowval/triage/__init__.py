@@ -48,16 +48,14 @@ def group_mismatches(
     outcomes: Mapping[str, Sequence[Mapping[str, Any]]], checker: ResponseChecker, graph: SpecGraph
 ) -> list[MismatchGroup]:
     """Group mismatches across tests, so a bug seen by every test is reviewed once."""
-    groups: dict[tuple[str, int], MismatchGroup] = {}
+    groups: dict[str, MismatchGroup] = {}
     for test_id, calls in sorted(outcomes.items()):
         for call in calls:
             for mismatch in checker.check_call(call):
                 operation = graph.operation_at(str(call["method"]), str(call["template"]))
                 name = operation.operation_id if operation else str(call["template"])
-                # The same field can mean different things under different statuses.
                 group = groups.setdefault(
-                    (mismatch.key, int(call["status"])),
-                    MismatchGroup(f"{mismatch.key}|{call['status']}", mismatch.message),
+                    mismatch.key, MismatchGroup(mismatch.key, mismatch.message)
                 )
                 group.operations.add(name)
                 group.tests.add(test_id)

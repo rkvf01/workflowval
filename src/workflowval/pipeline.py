@@ -344,7 +344,7 @@ class _Session:
                 {
                     group.finding_id: {
                         "calls": [group.example],
-                        "keys": [group.key.rsplit("|", 1)[0]],
+                        "keys": [group.key],
                         "tests": sorted(group.tests),
                     }
                 }
