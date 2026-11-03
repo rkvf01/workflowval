@@ -60,7 +60,7 @@ def _section(title: str, lines: list[str]) -> list[str]:
 
 
 def _is_problem(test: TestResult) -> bool:
-    return test.status is not TestStatus.PASSED
+    return test.status not in {TestStatus.PASSED, TestStatus.SKIPPED}
 
 
 def render_report(run: RunResults) -> str:
@@ -145,6 +145,8 @@ def render_junit(run: RunResults) -> str:
         if test.status in {TestStatus.FAILED, TestStatus.ERROR}:
             label = verdict.label.value if verdict else "unlabeled"
             ET.SubElement(case, "failure", message=f"{label}: {reason}"[:1000])
+        elif test.status is TestStatus.SKIPPED:
+            ET.SubElement(case, "skipped", message="read-only run")
         elif test.status is not TestStatus.PASSED:
             label = verdict.label.value if verdict else test.status.value
             ET.SubElement(case, "skipped", message=f"expected to fail, {label}: {reason}"[:1000])

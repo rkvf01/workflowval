@@ -7,7 +7,7 @@ import typer
 from typer.testing import CliRunner
 
 from workflowval import __version__
-from workflowval.cli import EXIT_NOT_IMPLEMENTED, app, resolve_models
+from workflowval.cli import app, resolve_models
 
 runner = CliRunner()
 
@@ -58,21 +58,6 @@ def test_no_arguments_shows_help() -> None:
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert (result.exit_code, result.output.strip()) == (0, f"workflowval {__version__}")
-
-
-@pytest.mark.parametrize(
-    ("args", "flag"),
-    [
-        (["test", "s.json", "--base-url", "http://localhost", "--read-only"], "--read-only"),
-        (["test", "s.json", "--base-url", "http://localhost", "--ci"], "--ci"),
-        (["run", "tests/wf", "--ci"], "--ci"),
-        (["run", "tests/wf", "--read-only"], "--read-only"),
-    ],
-)
-def test_flags_not_built_yet_refuse_instead_of_being_ignored(args: list[str], flag: str) -> None:
-    result = runner.invoke(app, args)
-    assert result.exit_code == EXIT_NOT_IMPLEMENTED
-    assert f"{flag} isn't implemented yet" in result.output
 
 
 @pytest.mark.parametrize("flag", ["--max-iterations", "--max-steps"])

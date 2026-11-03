@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from workflowval import cli
@@ -1576,3 +1577,244 @@ def test_two_failures_with_one_root_cause_are_filed_once_across_rounds(
     report = run_test_pipeline(config(items_api, tmp_path, PLANNED, reviewer, review_rounds=2))
     assert len(list((tmp_path / "reports" / "bugs").glob("*.md"))) == 1
     assert report.results.tests[0].status.value == "xfailed"
+
+
+def test_read_only_sends_no_writes_and_the_run_passes(items_api: ItemsApi, tmp_path: Path) -> None:
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, read_only=True))
+    assert items_api.items == {}
+    assert report.results.tests[0].status.value == "skipped"
+    assert not report.results.has_unexpected_failures
+    assert report.results.summary() == "0 passed, 1 skipped"
+
+
+def test_read_only_still_sends_reads(items_api: ItemsApi, tmp_path: Path) -> None:
+    read = lifecycle(
+        id="read_only_item",
+        steps=[{"op": "getItem", "params": {"id": 999}, "expect": {"status": 404}}],
+        cleanup=[],
+    )
+    planned = [call("write_workflow", workflow=read), DONE, DONE]
+    # The spec doesn't list this 404, so the Reviewer gets asked about it once.
+    report = run_test_pipeline(config(items_api, tmp_path, planned, [DONE], read_only=True))
+    assert report.results.tests[0].status.value == "passed"
+
+
+def test_cli_read_only_runs_saved_tests_without_writing(
+    items_api: ItemsApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    items_api.items.clear()
+    args = ["run", "tests/wf", "--base-url", items_api.url, "--read-only"]
+    result = invoke(tmp_path, monkeypatch, args)
+    assert result.exit_code == 0, result.output
+    assert items_api.items == {}
+    assert "SKIPPED     item_lifecycle" in result.output
+    assert "0 passed, 0 expected to fail, 1 skipped, 0 failed" in result.output
+
+
+def add_call_to_test(tmp_path: Path, url: str) -> None:
+    test_file = tmp_path / "tests" / "wf" / "test_item_lifecycle.py"
+    source = test_file.read_text()
+    assert "    saved = {}\n" in source
+    call_line = f"    saved = {{}}\n    api._client.get({url!r})\n"
+    test_file.write_text(source.replace("    saved = {}\n", call_line, 1))
+
+
+def test_a_request_to_a_host_that_is_not_allowed_is_refused(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    add_call_to_test(tmp_path, "http://elsewhere.invalid/")
+    outcome = run_saved(items_api, tmp_path)
+    assert outcome.status == "failed"
+    assert "isn't an allowed host" in str(outcome.failing_assertion)
+
+
+def test_an_allowed_extra_host_gets_past_the_guard(items_api: ItemsApi, tmp_path: Path) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    add_call_to_test(tmp_path, "http://localhost:9/")
+    outcome = run_tests(
+        tmp_path / "tests" / "wf", base_url=items_api.url, allowed_hosts=["localhost"]
+    )[0]
+    assert "isn't an allowed host" not in str(outcome.failing_assertion)
+
+
+@pytest.mark.parametrize(("yes", "read_only"), [(True, False), (False, True)])
+def test_remote_writes_need_consent_or_read_only(yes: bool, read_only: bool) -> None:
+    cli.check_host(
+        "https://prod.example.com", None, allow_remote=True, yes=yes, read_only=read_only
+    )
+
+
+def test_ci_counts_as_consent_for_remote_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scripted: Callable[..., None]
+) -> None:
+    (tmp_path / "s.json").write_text(json.dumps(spec()))
+    scripted(planner=[DONE])
+    args = ["test", "s.json", "--base-url", "http://h.invalid", "--allow-remote", "--ci"]
+    assert "pass --yes" not in invoke(tmp_path, monkeypatch, args).output
+
+
+def test_remote_writes_are_listed_before_asking(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(typer.BadParameter, match="--yes or --read-only"):
+        cli.check_host(
+            "https://prod.example.com",
+            None,
+            allow_remote=True,
+            yes=False,
+            planned_writes=["createItem"],
+        )
+    assert "Planned writes to prod.example.com: createItem" in capsys.readouterr().out
+
+
+def test_writes_in_spec_lists_only_writes(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps(spec()))
+    assert cli._writes_in_spec(str(path)) == ["login", "createItem", "deleteItem"]
+    assert cli._writes_in_spec(str(tmp_path / "missing.json")) == []
+
+
+def ci_args(url: str, *extra: str) -> list[str]:
+    return ["test", "s.json", "--base-url", url, "--ci", *extra]
+
+
+def test_ci_fails_on_an_api_bug_even_when_it_is_expected(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    items_api.broken_get = True
+    (tmp_path / "s.json").write_text(json.dumps(spec()))
+    scripted(planner=PLANNED, reviewer=[verdict("API_BUG"), DONE, DONE])
+    result = invoke(tmp_path, monkeypatch, ci_args(items_api.url))
+    assert result.exit_code == cli.EXIT_FAILURES
+    assert "1 API_BUG, above the limit of 0" in result.output
+
+
+def test_ci_threshold_allows_a_known_number_of_bugs(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    items_api.broken_get = True
+    (tmp_path / "s.json").write_text(json.dumps(spec()))
+    scripted(planner=PLANNED, reviewer=[verdict("API_BUG"), DONE, DONE])
+    result = invoke(tmp_path, monkeypatch, ci_args(items_api.url, "--ci-max-api-bugs", "1"))
+    assert result.exit_code == 0, result.output
+
+
+def test_ci_fails_on_anything_unresolved(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    items_api.broken_get = True
+    (tmp_path / "s.json").write_text(json.dumps(spec()))
+    scripted(planner=PLANNED, reviewer=[DONE])
+    result = invoke(tmp_path, monkeypatch, ci_args(items_api.url, "--ci-max-api-bugs", "9"))
+    assert result.exit_code == cli.EXIT_FAILURES
+    assert "1 unresolved" in result.output
+
+
+def test_ci_passes_when_all_is_well(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    (tmp_path / "s.json").write_text(json.dumps(spec()))
+    scripted(planner=PLANNED)
+    assert invoke(tmp_path, monkeypatch, ci_args(items_api.url)).exit_code == 0
+
+
+def test_cli_run_ci_counts_known_issues_with_no_model(
+    items_api: ItemsApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marked_run(items_api, tmp_path)
+    args = ["run", "tests/wf", "--base-url", items_api.url, "--ci"]
+    result = invoke(tmp_path, monkeypatch, args)
+    assert result.exit_code == cli.EXIT_FAILURES
+    assert "1 API_BUG" in result.output
+    result = invoke(tmp_path, monkeypatch, [*args, "--ci-max-api-bugs", "1"])
+    assert result.exit_code == 0, result.output
+
+
+class KilledAfter(FakeModel):
+    """Stands in for a killed run: the process dies at this model call."""
+
+    def __init__(self, replies: list[Reply], after: int) -> None:
+        super().__init__(replies)
+        self.after = after
+        self.made = 0
+
+    def complete(self, messages: Any, tools: Any) -> Reply:
+        if self.made >= self.after:
+            raise KeyboardInterrupt
+        self.made += 1
+        return super().complete(messages, tools)
+
+
+def kill_with(built: TestConfig, reviewer: KilledAfter) -> None:
+    with pytest.raises(KeyboardInterrupt):
+        run_test_pipeline(replace(built, models={**built.models, "reviewer": reviewer}))
+
+
+def test_a_killed_run_resumes_at_its_last_step_without_replanning(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    kill_with(config(items_api, tmp_path, PLANNED), KilledAfter([], 0))
+    state = json.loads((tmp_path / ".workflowval" / "state.json").read_text())
+    assert state.get("stop_reason") is None
+    assert "render_tests" in state["completed_steps"]
+    # The Planner has no replies left, so asking it anything would fail.
+    reviewer = [verdict("API_BUG"), DONE, DONE]
+    report = run_test_pipeline(config(items_api, tmp_path, reviewer=reviewer))
+    assert report.resumed
+    assert report.run.stop_reason is StopReason.COMPLETED
+    assert report.results.tests[0].verdict.label.value == "API_BUG"
+    assert report.run.state.steps_used == 3 + 3, "planning's calls carry over, plus 3 new"
+
+
+def test_a_finished_run_does_not_resume(items_api: ItemsApi, tmp_path: Path) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    assert not run_test_pipeline(config(items_api, tmp_path)).resumed
+
+
+def test_a_killed_run_on_a_changed_spec_starts_again(items_api: ItemsApi, tmp_path: Path) -> None:
+    items_api.broken_get = True
+    kill_with(config(items_api, tmp_path, PLANNED), KilledAfter([], 0))
+    items_api.broken_get = False
+    changed = spec(tags=[])
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, specification=changed))
+    assert not report.resumed
+    assert report.planned
+
+
+def test_resume_keeps_recorded_traffic_for_tests_it_does_not_rerun(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    built = config(items_api, tmp_path, PLANNED)
+    # The verdict lands, then the process dies asking for the bug report.
+    kill_with(built, KilledAfter([verdict("API_BUG"), DONE], 2))
+    report = run_test_pipeline(config(items_api, tmp_path, reviewer=[DONE]))
+    assert report.resumed
+    test = report.results.tests[0]
+    assert test.exchanges, "the recorded traffic must survive the restart"
+    assert test.verdict.label.value == "API_BUG"
+
+
+def test_a_drift_run_does_not_make_the_next_test_replan(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    scripted()
+    assert invoke(tmp_path, monkeypatch, drift_args(items_api.url)).exit_code == 0
+    assert not run_test_pipeline(config(items_api, tmp_path)).planned

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -29,7 +29,7 @@ from workflowval.spec import SpecError, build_graph, load_spec
 from workflowval.testrun import run_tests
 from workflowval.tools import ROLE_TOOLS
 
-EXIT_NOT_IMPLEMENTED = 3
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 EXIT_FAILURES = 1
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -157,25 +157,14 @@ def resolve_models(
     return ModelChoice(default, roles)
 
 
-def _stub(command: str, milestone: str) -> None:
-    typer.echo(
-        f"workflowval {command} is not implemented yet; it arrives in {milestone}.", err=True
-    )
-    raise typer.Exit(EXIT_NOT_IMPLEMENTED)
-
-
-def _refuse_unbuilt(**flags: bool | Path | None) -> None:
-    """Refuse a flag that isn't built yet, rather than ignore a safety or reporting promise."""
-    milestones = {"read_only": "M3", "ci": "M3"}
-    for name, value in flags.items():
-        if value:
-            flag = "--" + name.replace("_", "-")
-            typer.echo(f"{flag} isn't implemented yet; it arrives in {milestones[name]}.", err=True)
-            raise typer.Exit(EXIT_NOT_IMPLEMENTED)
-
-
 def check_host(
-    base_url: str, allow_hosts: list[str] | None, *, allow_remote: bool, yes: bool
+    base_url: str,
+    allow_hosts: list[str] | None,
+    *,
+    allow_remote: bool,
+    yes: bool,
+    read_only: bool = False,
+    planned_writes: Sequence[str] = (),
 ) -> None:
     """Enforce NFR-1 and NFR-2: only allowed hosts, and nothing remote without explicit consent."""
     host = urlparse(base_url).hostname
@@ -183,11 +172,33 @@ def check_host(
         raise typer.BadParameter(f"--base-url must be a full URL, got {base_url!r}")
     if allow_hosts and host not in allow_hosts:
         raise typer.BadParameter(f"{host} isn't in --allow-host")
-    if host not in LOCAL_HOSTS:
-        if not allow_remote:
-            raise typer.BadParameter(f"{host} isn't local: pass --allow-remote to call it")
-        if not yes:
-            raise typer.BadParameter(f"tests write to {host}: pass --yes to confirm")
+    if host in LOCAL_HOSTS:
+        return
+    if not allow_remote:
+        raise typer.BadParameter(f"{host} isn't local: pass --allow-remote to call it")
+    if read_only:
+        return
+    if planned_writes:
+        typer.echo(f"Planned writes to {host}: {', '.join(planned_writes)}")
+    if not yes:
+        raise typer.BadParameter(f"tests write to {host}: pass --yes or --read-only to confirm")
+
+
+def _writes_in_spec(spec: str) -> list[str]:
+    """The operations that write, to show before running against a non-local host."""
+    try:
+        operations = build_graph(load_spec(spec)).operations
+    except SpecError:
+        return []  # The pipeline reports a bad spec properly.
+    return [op.operation_id for op in operations if op.method.upper() not in SAFE_METHODS]
+
+
+def _ci_exit(run_results: RunResults, *, max_api_bugs: int, max_spec_drift: int) -> None:
+    """Fail the build on anything unresolved, or on bugs above the thresholds (FR-12)."""
+    reasons = run_results.ci_failures(max_api_bugs=max_api_bugs, max_spec_drift=max_spec_drift)
+    if reasons:
+        typer.echo(f"CI failed: {'; '.join(reasons)}", err=True)
+        raise typer.Exit(EXIT_FAILURES)
 
 
 def _load_auth(path: Path | None) -> AuthConfig | None:
@@ -238,6 +249,8 @@ def _print_report(report: TestRunReport) -> None:
         typer.echo(f"CHANGED     {change}")
     for fixed in report.looks_fixed:
         typer.echo(f"LOOKS FIXED {fixed}")
+    if report.resumed:
+        typer.echo("RESUMED     carried on from where the last run was killed")
     typer.echo(report.results.summary())
     if report.results.uncovered_operations:
         operations = ", ".join(report.results.uncovered_operations)
@@ -307,9 +320,15 @@ def test_command(
     no_cost_tracking: NoCost = False,
 ) -> None:
     """Plan workflows, write tests, run them against the API and triage every failure."""
-    _refuse_unbuilt(read_only=read_only, ci=ci)
     choice = resolve_models(model, role_model)
-    check_host(base_url, allow_host, allow_remote=allow_remote, yes=yes)
+    check_host(
+        base_url,
+        allow_host,
+        allow_remote=allow_remote,
+        yes=yes or ci,
+        read_only=read_only,
+        planned_writes=_writes_in_spec(spec),
+    )
     auth_config = _load_auth(auth)
     _check_auth_env(auth_config)
     tracked = _cost_tracked(no_cost_tracking)
@@ -328,12 +347,16 @@ def test_command(
             docs_dir=docs,
             auth=auth_config,
             reports_dir=report,
+            read_only=read_only,
+            allowed_hosts=tuple(allow_host or ()),
             plan_only=plan_only,
             verbose=verbose,
             cost_tracked=tracked,
         )
     )
     _print_report(outcome)
+    if ci:
+        _ci_exit(outcome.results, max_api_bugs=ci_max_api_bugs, max_spec_drift=ci_max_spec_drift)
     clean = outcome.run.stop_reason is StopReason.COMPLETED
     if not clean or outcome.results.has_unexpected_failures:
         raise typer.Exit(EXIT_FAILURES)
@@ -391,14 +414,21 @@ def run_command(
     verbose: Verbose = False,
 ) -> None:
     """Re-run existing tests without calling a model."""
-    _refuse_unbuilt(read_only=read_only, ci=ci)
     if not tests.is_dir():
         raise typer.BadParameter(f"no such folder: {tests}")
     if base_url:
-        check_host(base_url, allow_host, allow_remote=allow_remote, yes=yes)
+        check_host(
+            base_url, allow_host, allow_remote=allow_remote, yes=yes or ci, read_only=read_only
+        )
     auth_config = _load_auth(auth)
     _check_auth_env(auth_config)
-    outcomes = run_tests(tests, base_url=base_url, env_names=auth_env_names(auth_config))
+    outcomes = run_tests(
+        tests,
+        base_url=base_url,
+        env_names=auth_env_names(auth_config),
+        read_only=read_only,
+        allowed_hosts=allow_host or (),
+    )
     if not outcomes:
         typer.echo(f"No tests found in {tests}", err=True)
         raise typer.Exit(EXIT_FAILURES)
@@ -407,15 +437,22 @@ def run_command(
             typer.echo(f"LOOKS FIXED {outcome.workflow_id}: {outcome.known_issue}")
         elif outcome.expected:
             typer.echo(f"EXPECTED    {outcome.workflow_id}: {outcome.known_issue}")
+        elif outcome.skipped:
+            typer.echo(f"SKIPPED     {outcome.workflow_id}: read-only run")
         else:
             detail = "" if outcome.passed else f": {outcome.failing_assertion}"
             typer.echo(f"{outcome.status.upper():<11} {outcome.workflow_id}{detail}")
     passed = sum(outcome.passed for outcome in outcomes)
     expected = sum(outcome.expected for outcome in outcomes)
-    failed = len(outcomes) - passed - expected
-    typer.echo(f"{passed} passed, {expected} expected to fail, {failed} failed")
+    skipped = sum(outcome.skipped for outcome in outcomes)
+    failed = len(outcomes) - passed - expected - skipped
+    extra = f", {skipped} skipped" if skipped else ""
+    typer.echo(f"{passed} passed, {expected} expected to fail{extra}, {failed} failed")
+    results = results_from_outcomes(outcomes, Path.cwd())
     if report is not None:
-        write_reports(results_from_outcomes(outcomes, Path.cwd()), report)
+        write_reports(results, report)
+    if ci:
+        _ci_exit(results, max_api_bugs=ci_max_api_bugs, max_spec_drift=ci_max_spec_drift)
     if failed:
         raise typer.Exit(EXIT_FAILURES)
 
@@ -440,9 +477,15 @@ def drift_command(
     temperature: Temperature = None,
 ) -> None:
     """Check only whether the live API still matches its spec."""
-    _refuse_unbuilt(read_only=read_only, ci=ci)
     choice = resolve_models(model, role_model)
-    check_host(base_url, allow_host, allow_remote=allow_remote, yes=yes)
+    check_host(
+        base_url,
+        allow_host,
+        allow_remote=allow_remote,
+        yes=yes or ci,
+        read_only=read_only,
+        planned_writes=_writes_in_spec(spec),
+    )
     auth_config = _load_auth(auth)
     _check_auth_env(auth_config)
     outcome = _run_with(
@@ -455,11 +498,15 @@ def drift_command(
             budget=Budget(max_steps=max_steps),
             auth=auth_config,
             reports_dir=report,
+            read_only=read_only,
+            allowed_hosts=tuple(allow_host or ()),
             verbose=verbose,
             cost_tracked=_cost_tracked(False),
         ),
     )
     _print_report(outcome)
+    if ci:
+        _ci_exit(outcome.results, max_api_bugs=10**9, max_spec_drift=ci_max_spec_drift)
     drifted = any(f.label not in {None, Label.TEST_BUG} for f in outcome.results.findings)
     if outcome.run.stop_reason is not StopReason.COMPLETED or drifted:
         raise typer.Exit(EXIT_FAILURES)

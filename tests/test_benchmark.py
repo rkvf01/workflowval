@@ -277,7 +277,8 @@ def test_a_test_that_never_reached_the_refund_is_not_a_detection() -> None:
 
 
 def test_each_model_keeps_its_runs_apart_inside_the_ignored_folder() -> None:
-    first = bench.runs_folder("vendor/model-a")
-    assert first != bench.runs_folder("vendor/model-b")
-    assert first.parent == bench.LEDGER.parent
+    first = bench.runs_folder("vendor/model-a", 2)
+    assert first != bench.runs_folder("vendor/model-b", 2)
+    assert first != bench.runs_folder("vendor/model-a", 0), "review on and off stay apart"
+    assert bench.LEDGER.parent in first.parents
     assert "/" not in first.name

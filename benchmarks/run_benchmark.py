@@ -31,7 +31,7 @@ SEEDED = ROOT / "seeded"
 LEDGER = ROOT.parent / ".benchmark" / "spend.jsonl"
 PORT = 18090
 TOKEN = "orders-practice-token"  # noqa: S105 - the seeded app's practice value
-MAX_STEPS = 150
+MAX_STEPS = 200
 ORDER_OPERATIONS = frozenset(
     {"createOrder", "getOrder", "listOrders", "payOrder", "shipOrder", "cancelOrder", "refundOrder"}
 )
@@ -302,13 +302,14 @@ def _wait_until_up(url: str) -> None:
     raise RuntimeError(f"the seeded app didn't start at {url}")
 
 
-def runs_folder(model: str) -> Path:
-    """Where one model's runs are kept, so comparing models overwrites nothing."""
-    return LEDGER.parent / re.sub(r"[^a-z0-9.-]+", "-", model.lower())
+def runs_folder(model: str, review_rounds: int) -> Path:
+    """Where one setup's runs are kept, so comparing setups overwrites nothing."""
+    name = re.sub(r"[^a-z0-9.-]+", "-", model.lower())
+    return LEDGER.parent / "m3" / f"{name}-review-{review_rounds}"
 
 
 def run_once(
-    build: str, round_number: int, folder: Path
+    build: str, round_number: int, folder: Path, review_rounds: int
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Run workflowval on one build, from a folder that can't see the labels or the app."""
     env = {**os.environ, "ORDERS_TOKEN": TOKEN, "SEEDED_BUILD": build}
@@ -346,6 +347,8 @@ def run_once(
                     str(SEEDED / "auth.json"),
                     "--max-steps",
                     str(MAX_STEPS),
+                    "--max-review-rounds",
+                    str(review_rounds),
                 ],
                 cwd=temporary,
                 env={k: v for k, v in env.items() if k != "SEEDED_BUILD"},
@@ -422,13 +425,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--limit", type=float, default=2.0, help="Total USD across all calls")
+    parser.add_argument(
+        "--review-rounds", type=int, default=2, help="0 turns the Reviewer's plan review off"
+    )
     parser.add_argument("--rescore", action="store_true", help="Score saved runs, at no cost")
     args = parser.parse_args()
     labels = json.loads((SEEDED / "labels.json").read_text())
     model = os.environ.get("WORKFLOWVAL_MODEL")
     if not model:
         parser.error("set WORKFLOWVAL_MODEL")
-    folder = runs_folder(model)
+    folder = runs_folder(model, args.review_rounds)
     if args.rescore:
         return rescore(folder, labels)
     buggy_scores: list[dict[str, Any]] = []
@@ -438,7 +444,7 @@ def main() -> int:
             if not next_run_is_allowed(spent(), args.limit):
                 print(f"Stopping: another run could pass ${args.limit}. Spent ${sum(spent()):.4f}.")
                 return 3
-            results, workflows = run_once(build, number, folder)
+            results, workflows = run_once(build, number, folder, args.review_rounds)
             if results.get("unpriced_calls"):
                 print("Stopping: a run had calls with no known price, so spend isn't reliable.")
                 return 3

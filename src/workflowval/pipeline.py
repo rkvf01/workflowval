@@ -117,6 +117,8 @@ class TestConfig:
     docs_dir: Path | None = None
     auth: AuthConfig | None = None
     reports_dir: Path | None = None
+    read_only: bool = False
+    allowed_hosts: tuple[str, ...] = ()
     plan_only: bool = False
     verbose: bool = False
     cost_tracked: bool = True
@@ -134,6 +136,7 @@ class TestRunReport:
     expectation_changes: list[str]
     planned: bool
     looks_fixed: list[str] = field(default_factory=list)
+    resumed: bool = False
 
 
 def auth_env_names(auth: AuthConfig | None) -> list[str]:
@@ -166,6 +169,26 @@ def _write_test_if_changed(workflow: Workflow, graph: SpecGraph, workdir: Path) 
     if path.is_file() and path.read_text(encoding="utf-8").startswith(hash_line(workflow)):
         return
     atomic_write_text(path, generate(workflow, graph).source)
+
+
+def _resumable(config: TestConfig, current_hash: str) -> RunState | None:
+    """Return the state of a run that was killed partway, on this same spec (FR-13).
+
+    A run that ended by itself has a stop reason, so it starts afresh.
+    """
+    path = config.workdir / ".workflowval" / "state.json"
+    try:
+        state = load_json(RunState, path) if path.is_file() else None
+    except (ValidationError, OSError):
+        return None
+    if (
+        state is None
+        or state.stop_reason is not None
+        or state.spec_hash != current_hash
+        or "plan" not in state.completed_steps
+    ):
+        return None
+    return state
 
 
 def _is_unedited(workflow: Workflow, graph: SpecGraph, workdir: Path) -> bool:
@@ -233,6 +256,39 @@ class _Session:
             return
         if not plan(ctx, self.planner, self.graph, self.login_operations):
             raise StopRun(StopReason.INVALID_OUTPUT, "the Planner wrote no workflows")
+
+    def _run_tests(self, workflow_ids: list[str] | None) -> list[Outcome]:
+        return run_tests(
+            self.workdir / "tests" / "wf",
+            base_url=self.base_url,
+            workflow_ids=workflow_ids,
+            env_names=auth_env_names(self.config.auth),
+            read_only=self.config.read_only,
+            allowed_hosts=self.config.allowed_hosts,
+        )
+
+    def _save_progress(self) -> None:
+        """Keep what a resumed run needs, since a killed process loses it."""
+        atomic_write_text(
+            self.workdir / ".workflowval" / "progress.json",
+            json.dumps(
+                {
+                    "outcomes": {key: vars(value) for key, value in self.outcomes.items()},
+                    "test_files": self.test_files,
+                    "filed": sorted(self.filed),
+                },
+                default=str,
+            ),
+        )
+
+    def load_progress(self) -> None:
+        """Pick up where a killed run stopped."""
+        path = self.workdir / ".workflowval" / "progress.json"
+        if path.is_file():
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.outcomes = {key: Outcome(**value) for key, value in saved["outcomes"].items()}
+            self.test_files = saved["test_files"]
+            self.filed = set(saved["filed"])
 
     def _review_log(self) -> ReviewLog:
         path = self.workdir / "review.json"
@@ -355,14 +411,10 @@ class _Session:
         if not is_reachable(self.base_url):
             raise StopRun(StopReason.API_UNREACHABLE, f"no response from {self.base_url}")
         wanted = None if ids is None else [i.rsplit("::test_", 1)[1] for i in ids]
-        outcomes = run_tests(
-            self.workdir / "tests" / "wf",
-            base_url=self.base_url,
-            workflow_ids=wanted,
-            env_names=auth_env_names(self.config.auth),
-        )
+        outcomes = self._run_tests(wanted)
         for outcome in outcomes:
             self.outcomes[test_id(outcome.workflow_id)] = outcome
+        self._save_progress()
         atomic_write_text(
             self.workdir / ".workflowval" / "last_results.json",
             json.dumps(
@@ -374,11 +426,7 @@ class _Session:
             ),
         )
         return [
-            TestOutcome(
-                test_id(o.workflow_id),
-                o.passed or o.expected,
-                "" if o.passed or o.expected else _failure_text(o),
-            )
+            TestOutcome(test_id(o.workflow_id), o.ok, "" if o.ok else _failure_text(o))
             for o in outcomes
         ]
 
@@ -454,6 +502,7 @@ class _Session:
             written = self._written_reports().get(first)
             if written is not None:
                 self.test_files.update(dict.fromkeys(tests, written))
+            self._save_progress()
 
     def review_mismatches(self, ctx: RunContext) -> None:
         """Have the Reviewer rule once on each distinct way responses broke the spec."""
@@ -495,15 +544,10 @@ class _Session:
         """Run every saved test once, for `drift`. Nothing is labeled or fixed."""
         if not is_reachable(self.base_url):
             raise StopRun(StopReason.API_UNREACHABLE, f"no response from {self.base_url}")
-        for outcome in run_tests(
-            self.workdir / "tests" / "wf",
-            base_url=self.base_url,
-            env_names=auth_env_names(self.config.auth),
-        ):
+        for outcome in self._run_tests(None):
             key = test_id(outcome.workflow_id)
             self.outcomes[key] = outcome
-            ok = outcome.passed or outcome.expected
-            ctx.state.closed_tests[key] = "passed" if ok else Label.UNRESOLVED.value
+            ctx.state.closed_tests[key] = "passed" if outcome.ok else Label.UNRESOLVED.value
 
     def fix(self, ctx: RunContext, failure: TestOutcome) -> None:
         verdict = read_verdicts(self.workdir)[failure.test_id]
@@ -558,14 +602,9 @@ class _Session:
                 self._save_and_render(workflow.model_copy(update={"known_issue": issue}))
                 marked.append(workflow.id)
         if marked:
-            rerun = run_tests(
-                self.workdir / "tests" / "wf",
-                base_url=self.base_url,
-                workflow_ids=marked,
-                env_names=auth_env_names(self.config.auth),
-            )
-            for outcome in rerun:
+            for outcome in self._run_tests(marked):
                 self.outcomes[test_id(outcome.workflow_id)] = outcome
+            self._save_progress()
         self._clear_fixed()
 
     def _clear_fixed(self) -> None:
@@ -755,6 +794,9 @@ def run_drift_pipeline(config: TestConfig) -> TestRunReport:
     session = _Session(config, graph, base_url, ResponseChecker(raw))
     for name in ("verdicts.json", "evidence.json", "reports.json"):
         (config.workdir / ".workflowval" / name).unlink(missing_ok=True)
+    # `drift` isn't a test run, so the next `test` must still know the plan is done.
+    state_path = config.workdir / ".workflowval" / "state.json"
+    earlier_state = state_path.read_bytes() if state_path.is_file() else None
     result = run(
         Pipeline(
             (
@@ -770,6 +812,8 @@ def run_drift_pipeline(config: TestConfig) -> TestRunReport:
         tool_context=_tool_context(config, graph, raw),
         cost_tracked=config.cost_tracked,
     )
+    if earlier_state is not None:
+        state_path.write_bytes(earlier_state)
     results = _build_results(session, result)
     results_path = config.workdir / "results.json"
     save_json(results, results_path)
@@ -785,15 +829,23 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
     base_url = resolve_base_url(config.base_url, graph)
     raw = load_raw_spec(config.spec_source)
     session = _Session(config, graph, base_url, ResponseChecker(raw))
-    session.needs_planning = _needs_planning(config, current_hash)
-    # Each run reports only its own expectation changes and verdicts.
+    resume = None if config.plan_only else _resumable(config, current_hash)
+    session.needs_planning = resume is not None or _needs_planning(config, current_hash)
     state_dir = config.workdir / ".workflowval"
-    (state_dir / "expectation_changes.jsonl").unlink(missing_ok=True)
-    (state_dir / "verdicts.json").unlink(missing_ok=True)
-    (state_dir / "last_results.json").unlink(missing_ok=True)
-    (state_dir / "evidence.json").unlink(missing_ok=True)
-    (state_dir / "reports.json").unlink(missing_ok=True)
-    if session.needs_planning:
+    if resume is not None:
+        session.load_progress()
+    else:
+        # Each run reports only its own expectation changes and verdicts.
+        for name in (
+            "expectation_changes.jsonl",
+            "verdicts.json",
+            "last_results.json",
+            "evidence.json",
+            "reports.json",
+            "progress.json",
+        ):
+            (state_dir / name).unlink(missing_ok=True)
+    if session.needs_planning and resume is None:
         (config.workdir / "review.json").unlink(missing_ok=True)
     steps: list[CodeStep | FixLoop] = [
         CodeStep("plan", session.plan_step),
@@ -802,7 +854,9 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
     if not config.plan_only:
         steps += [
             CodeStep("render_tests", session.render_tests),
-            FixLoop("test_and_fix", session.execute, session.label, session.fix),
+            FixLoop(
+                "test_and_fix", session.execute, session.label, session.fix, session.pending_tests
+            ),
             CodeStep("write_failure_files", session.write_failure_files),
             CodeStep("update_known_issues", session.update_known_issues),
         ]
@@ -832,6 +886,7 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
         verbose=config.verbose,
         tool_context=_tool_context(config, graph, raw),
         cost_tracked=config.cost_tracked,
+        resume=resume,
     )
     results = _build_results(session, result)
     results_path = config.workdir / "results.json"
@@ -845,4 +900,5 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
         _read_expectation_changes(config.workdir),
         session.needs_planning,
         session.looks_fixed,
+        resume is not None,
     )

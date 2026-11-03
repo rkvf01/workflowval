@@ -420,16 +420,23 @@ def run(
     verbose: bool = False,
     tool_context: ToolContext | None = None,
     cost_tracked: bool = True,
+    resume: RunState | None = None,
 ) -> RunResult:
-    """Run a pipeline. It always terminates, and the result says which limit stopped it, if any."""
+    """Run a pipeline. It always terminates, and the result says which limit stopped it, if any.
+
+    With `resume`, it carries on from that state, skipping the steps already completed. Call counts
+    in the stats start again, while tokens, cost and steps used carry over.
+    """
     tracer = Tracer(workdir / ".workflowval" / "trace.jsonl", echo=verbose)
-    state = RunState(spec_hash=spec_hash, cost_tracked=cost_tracked)
+    state = resume or RunState(spec_hash=spec_hash, cost_tracked=cost_tracked)
     ctx = RunContext(budget, workdir, tracer, state, tool_context)
     reason, detail = StopReason.COMPLETED, ""
     tracer.event("run_start", spec_hash=spec_hash, steps=[step.name for step in pipeline.steps])
     ctx.checkpoint()
     try:
         for step in pipeline.steps:
+            if step.name in ctx.state.completed_steps:
+                continue
             # A stuck task ends that step's work, and later steps can still run.
             with contextlib.suppress(TaskLimitReached):
                 _run_step(ctx, step)
