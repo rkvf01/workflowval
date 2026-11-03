@@ -3188,16 +3188,16 @@ dependencies = [
     { name = "openapi-core" },
     { name = "openapi-spec-validator" },
     { name = "pydantic" },
+    { name = "pytest" },
+    { name = "ruff" },
     { name = "typer" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
-    { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-socket" },
-    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -3207,16 +3207,16 @@ requires-dist = [
     { name = "openapi-core", specifier = ">=0.19" },
     { name = "openapi-spec-validator", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "ruff", specifier = ">=0.6" },
     { name = "typer", specifier = ">=0.12" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.10" },
-    { name = "pytest", specifier = ">=8" },
     { name = "pytest-cov", specifier = ">=5" },
     { name = "pytest-socket", specifier = ">=0.7" },
-    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

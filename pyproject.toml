@@ -12,6 +12,8 @@ dependencies = [
     "openapi-core>=0.19",
     "openapi-spec-validator>=0.7",
     "pydantic>=2.7",
+    "pytest>=8",
+    "ruff>=0.6",
     "typer>=0.12",
 ]
 
@@ -21,10 +23,8 @@ workflowval = "workflowval.cli:app"
 [dependency-groups]
 dev = [
     "mypy>=1.10",
-    "pytest>=8",
     "pytest-cov>=5",
     "pytest-socket>=0.7",
-    "ruff>=0.6",
 ]
 
 [build-system]
@@ -44,6 +44,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]
+"src/workflowval/gen/templates/**" = ["S101"]
 
 [tool.mypy]
 strict = true
