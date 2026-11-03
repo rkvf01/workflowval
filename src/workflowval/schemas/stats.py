@@ -12,6 +12,7 @@ class CallCounts(Strict):
 
     model_calls: int = Field(default=0, ge=0)
     tool_calls: dict[str, int] = Field(default_factory=dict)
+    cost_usd: float = Field(default=0.0, ge=0, description="Sum over calls with a known price")
 
 
 class StatsTotal(Strict):
@@ -19,6 +20,7 @@ class StatsTotal(Strict):
 
     model_calls: int = Field(default=0, ge=0)
     tool_calls: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0)
     limit: int = Field(ge=1, description="The --max-steps value for this run")
 
 
@@ -27,6 +29,7 @@ class RunStats(Strict):
 
     run: CallCounts = Field(default_factory=CallCounts)
     workflows: dict[str, CallCounts] = Field(default_factory=dict)
+    roles: dict[str, CallCounts] = Field(default_factory=dict)
     total: StatsTotal
     spec_hash: str = ""
     stop_reason: str | None = None

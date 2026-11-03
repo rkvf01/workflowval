@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from workflowval.models.base import ToolSpec
+from workflowval.spec import SpecGraph
 
 
 class ToolError(Exception):
@@ -18,9 +19,11 @@ class ToolError(Exception):
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Where a tool may read and write."""
+    """Where a tool may read and write, and what it knows about the API."""
 
     workdir: Path
+    graph: SpecGraph | None = None
+    docs_dir: Path | None = None
 
 
 @dataclass(frozen=True)

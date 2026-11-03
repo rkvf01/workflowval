@@ -30,6 +30,7 @@ class StopReason(StrEnum):
     NO_PROGRESS = "no_progress"
     INVALID_OUTPUT = "invalid_output"
     MODEL_ERROR = "model_error"
+    API_UNREACHABLE = "api_unreachable"
 
 
 @dataclass(frozen=True)
@@ -140,7 +141,9 @@ class RunResult:
         """One line of tokens and cost to print for every run (NFR-4)."""
         s = self.state
         cost = f"${s.cost_usd:.4f}"
-        if s.unpriced_calls:
+        if not s.cost_tracked:
+            cost = "not tracked"
+        elif s.unpriced_calls:
             cost += f" (plus {s.unpriced_calls} calls with no known price)"
         line = (
             f"stopped: {self.stop_reason.value}; steps: {s.steps_used}; "
@@ -149,7 +152,9 @@ class RunResult:
         return f"{line}\n{self.suggestion}" if self.suggestion else line
 
 
-class _Stop(Exception):
+class StopRun(Exception):
+    """Raised by steps and the loop to end a run with a stated reason."""
+
     def __init__(self, reason: StopReason, detail: str) -> None:
         super().__init__(detail)
         self.reason = reason
@@ -164,6 +169,7 @@ class RunContext:
     workdir: Path
     tracer: Tracer
     state: RunState = field(default_factory=RunState)
+    tool_context: ToolContext | None = None
     stats: StatsCollector = field(init=False)
 
     def __post_init__(self) -> None:
@@ -204,7 +210,9 @@ class RunContext:
         invalid_streak = 0
         while True:
             reply = self._call_model(role, messages, specs, workflow_id)
-            self.stats.record_reply(workflow_id, reply.tool_calls, {*TOOLS, *tools})
+            self.stats.record_reply(
+                workflow_id, reply.tool_calls, {*TOOLS, *tools}, role.name, reply.usage.cost_usd
+            )
             messages.append(Message("assistant", reply.text, tool_calls=reply.tool_calls))
             if not reply.tool_calls:
                 return reply.text
@@ -215,7 +223,7 @@ class RunContext:
                 messages.append(Message("tool", result, tool_call_id=call.id))
             invalid_streak = invalid_streak + 1 if any_invalid else 0
             if invalid_streak > MAX_INVALID_RETRIES:
-                raise _Stop(
+                raise StopRun(
                     StopReason.INVALID_OUTPUT,
                     f"role {role.name} sent invalid tool calls {invalid_streak} times in a row",
                 )
@@ -228,14 +236,14 @@ class RunContext:
         workflow_id: str | None,
     ) -> Reply:
         if self.state.steps_used >= self.budget.max_steps:
-            raise _Stop(StopReason.MAX_STEPS, f"used all {self.budget.max_steps} steps")
+            raise StopRun(StopReason.MAX_STEPS, f"used all {self.budget.max_steps} steps")
         self.state.steps_used += 1
         try:
             reply = role.model.complete(messages, specs)
         except ModelError as exc:
-            self.stats.record_failed_call(workflow_id)
+            self.stats.record_failed_call(workflow_id, role.name)
             self.tracer.event("model_error", role=role.name, model=role.model.name, error=str(exc))
-            raise _Stop(StopReason.MODEL_ERROR, str(exc)) from exc
+            raise StopRun(StopReason.MODEL_ERROR, str(exc)) from exc
         self._add_usage(reply.usage)
         self.tracer.event(
             "model_call",
@@ -268,7 +276,7 @@ class RunContext:
             result = f"Error: {call.parse_error}"
         else:
             try:
-                result = tool.invoke(call.arguments, ToolContext(self.workdir))
+                result = tool.invoke(call.arguments, self.tool_context or ToolContext(self.workdir))
                 invalid = False
             except ValidationError as exc:
                 # include_input=False: the rejected value may be a secret.
@@ -314,7 +322,7 @@ def _run_fix_loop(ctx: RunContext, step: FixLoop) -> None:
     stalled = 0
     while to_run is None or to_run:
         if state.iterations >= budget.max_iterations:
-            raise _Stop(StopReason.MAX_ITERATIONS, f"used all {budget.max_iterations} iterations")
+            raise StopRun(StopReason.MAX_ITERATIONS, f"used all {budget.max_iterations} iterations")
         state.iterations += 1
         outcomes = list(step.execute(ctx, to_run))
         # A test asked for but not reported must not count as passing.
@@ -350,7 +358,7 @@ def _run_fix_loop(ctx: RunContext, step: FixLoop) -> None:
         previous = current
         ctx.checkpoint()
         if to_fix and stalled >= budget.no_progress_limit:
-            raise _Stop(StopReason.NO_PROGRESS, f"no progress in {stalled} iterations")
+            raise StopRun(StopReason.NO_PROGRESS, f"no progress in {stalled} iterations")
 
         for failure in to_fix:
             state.fix_attempts[failure.test_id] = state.fix_attempts.get(failure.test_id, 0) + 1
@@ -377,10 +385,13 @@ def run(
     workdir: Path,
     spec_hash: str = "",
     verbose: bool = False,
+    tool_context: ToolContext | None = None,
+    cost_tracked: bool = True,
 ) -> RunResult:
     """Run a pipeline. It always terminates, and the result says which limit stopped it, if any."""
     tracer = Tracer(workdir / ".workflowval" / "trace.jsonl", echo=verbose)
-    ctx = RunContext(budget, workdir, tracer, RunState(spec_hash=spec_hash))
+    state = RunState(spec_hash=spec_hash, cost_tracked=cost_tracked)
+    ctx = RunContext(budget, workdir, tracer, state, tool_context)
     reason, detail = StopReason.COMPLETED, ""
     tracer.event("run_start", spec_hash=spec_hash, steps=[step.name for step in pipeline.steps])
     ctx.checkpoint()
@@ -389,7 +400,7 @@ def run(
             _run_step(ctx, step)
             ctx.state.completed_steps.append(step.name)
             ctx.checkpoint()
-    except _Stop as stop:
+    except StopRun as stop:
         reason, detail = stop.reason, stop.detail
     # Whatever is still open failed without a final label, and must show up as UNRESOLVED.
     for test_id in list(ctx.state.open_tests):

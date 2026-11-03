@@ -55,6 +55,7 @@ class LiteLLMModel:
     temperature: float | None = None
     seed: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    track_cost: bool = True
 
     def complete(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> Reply:
         """Call the provider and translate its reply. Failures raise a redacted ModelError."""
@@ -90,19 +91,31 @@ class LiteLLMModel:
             raise ModelError(f"{self.name}: {type(exc).__name__}: {detail}") from None
         message = response.choices[0].message
         usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
         return Reply(
             text=message.content or "",
             tool_calls=tuple(_from_wire(c) for c in message.tool_calls or ()),
             usage=Usage(
-                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                cost_usd=self._cost(litellm, response),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=self._cost(litellm, response, input_tokens + output_tokens),
             ),
         )
 
-    @staticmethod
-    def _cost(litellm: Any, response: Any) -> float | None:
-        try:
-            return float(litellm.completion_cost(completion_response=response))
-        except Exception:
-            return None  # An unpriced model (e.g. a brand-new or local one) is not an error.
+    def _cost(self, litellm: Any, response: Any, tokens: int) -> float | None:
+        """Prefer the price the provider reported, since LiteLLM's estimate can be wrongly 0."""
+        if not self.track_cost:
+            return None
+        hidden = getattr(response, "_hidden_params", None) or {}
+        reported = hidden.get("response_cost")
+        if reported is None:
+            reported = getattr(getattr(response, "usage", None), "cost", None)
+        if reported is None:
+            try:
+                reported = litellm.completion_cost(completion_response=response)
+            except Exception:
+                return None  # An unpriced model (e.g. a brand-new or local one) is not an error.
+        cost = float(reported)
+        # A call that used tokens wasn't free: the price is unknown, so don't report it as $0.
+        return None if cost == 0.0 and tokens else cost

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, computed_field, model_validator
 
@@ -87,6 +87,9 @@ class Verdict(Strict):
     reason: str = Field(min_length=1)
     evidence: Evidence = Field(default_factory=Evidence)
     action: Action = Field(default_factory=lambda: Action(kind=ActionKind.NONE))
+    fix_target: Literal["test", "workflow"] | None = Field(
+        default=None, description="For a TEST_BUG: what's wrong, the test code or the workflow"
+    )
 
 
 class TestResult(Strict):
@@ -122,6 +125,9 @@ class RunResults(Strict):
     stop_reason: str
     stop_detail: str | None = None
     tests: list[TestResult] = Field(default_factory=list)
+    uncovered_operations: list[str] = Field(
+        default_factory=list, description="Spec operations no workflow calls"
+    )
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0, description="Sum over calls with a known price")

@@ -109,6 +109,28 @@ def test_every_workflow_must_state_its_rule() -> None:
         Workflow.model_validate(data)
 
 
+def test_builtin_unique_values_need_no_saving() -> None:
+    step = {
+        "op": "x",
+        "body": {"name": "{unique}", "id": "{unique_int}"},
+        "expect": {"status": 200},
+    }
+    Workflow.model_validate(workflow(steps=[step], cleanup=[]))
+
+
+@pytest.mark.parametrize("path", ["$.a", "$.a.b[0].c", "$[1]", "$", "$.x-y"])
+def test_supported_json_paths(path: str) -> None:
+    step = {"op": "x", "save": {"a": path}, "expect": {"status": 200, "body": {path: 1}}}
+    Workflow.model_validate(workflow(steps=[step], cleanup=[]))
+
+
+@pytest.mark.parametrize("path", ["$..a", "$.a[*]", "$.a[?(@.b)]", "$x"])
+def test_unsupported_json_paths_are_refused(path: str) -> None:
+    step = {"op": "x", "expect": {"status": 200, "body": {path: 1}}}
+    with pytest.raises(ValidationError, match="JSONPath"):
+        Workflow.model_validate(workflow(steps=[step], cleanup=[]))
+
+
 def test_user_workflow_can_be_locked() -> None:
     assert Workflow.model_validate(workflow(source="user", locked=True)).locked
 

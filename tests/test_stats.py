@@ -25,7 +25,7 @@ from workflowval.loop.stats import (
     suggest_max_steps,
     workflow_of,
 )
-from workflowval.models import FakeModel, Reply, ToolCall, call
+from workflowval.models import FakeModel, Reply, ToolCall, Usage, call
 from workflowval.models.base import ModelError
 from workflowval.schemas import Label, RunStats, StatsTotal, load_json
 
@@ -272,3 +272,33 @@ def test_suggestion_appears_in_the_summary_and_never_changes_the_limit(tmp_path:
     assert results[4].stats.total.limit == 50
     trace = (tmp_path / ".workflowval" / "trace.jsonl").read_text().splitlines()
     assert "consider --max-steps 10" in json.loads(trace[-1])["suggestion"]
+
+
+def test_cost_is_tracked_per_workflow_and_role(tmp_path: Path) -> None:
+    planner = FakeModel(
+        [
+            Reply(
+                tool_calls=call("write_workflow", workflow=WORKFLOW).tool_calls,
+                usage=Usage(1, 1, 0.5),
+            ),
+            Reply(text="done", usage=Usage(1, 1, 0.25)),
+        ]
+    )
+    writer = FakeModel([Reply(text="done", usage=Usage(1, 1, 0.125))])
+    steps = [
+        RoleStep("plan", make_role("planner", planner), "x"),
+        RoleStep("fix", make_role("writer", writer), "x", workflow_id="wf_a"),
+    ]
+    stats = go(steps, tmp_path).stats
+    assert stats.workflows["wf_a"].cost_usd == 0.625
+    assert stats.run.cost_usd == 0.25
+    assert stats.roles["planner"].cost_usd == 0.75
+    assert stats.roles["planner"].tool_calls == {"write_workflow": 1}
+    assert stats.roles["writer"].cost_usd == 0.125
+    assert stats.total.cost_usd == 0.875
+
+
+def test_summary_says_when_cost_is_not_tracked(tmp_path: Path) -> None:
+    step = RoleStep("s", make_role("writer", FakeModel([DONE])), "x")
+    result = run(Pipeline((step,)), Budget(), workdir=tmp_path, cost_tracked=False)
+    assert "cost: not tracked" in result.summary

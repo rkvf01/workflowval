@@ -6,6 +6,7 @@ import math
 import re
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,20 @@ _WORKFLOW_ID = re.compile(r"[a-z0-9_]+")
 _TEST_FILE = re.compile(r"(?:^|/)test_([a-z0-9_]+)\.py(?:::|$)")
 
 
+@dataclass
+class _Tally:
+    model_calls: int = 0
+    cost_usd: float = 0.0
+    tools: Counter[str] = field(default_factory=Counter)
+
+    def counts(self) -> CallCounts:
+        return CallCounts(
+            model_calls=self.model_calls,
+            tool_calls=dict(sorted(self.tools.items())),
+            cost_usd=self.cost_usd,
+        )
+
+
 def workflow_of(arguments: Mapping[str, Any]) -> str | None:
     """Return the workflow a tool call's arguments name, if they name one validly."""
     workflow = arguments.get("workflow")
@@ -44,22 +59,34 @@ def workflow_of(arguments: Mapping[str, Any]) -> str | None:
 
 
 class StatsCollector:
-    """Collects one run's counts."""
+    """Collects one run's counts and costs, per workflow and per role."""
 
     def __init__(self, limit: int, spec_hash: str = "") -> None:
         self.limit = limit
         self.spec_hash = spec_hash
-        self._models: Counter[str | None] = Counter()
-        self._tools: dict[str | None, Counter[str]] = {}
+        self._owners: dict[str | None, _Tally] = {}
+        self._roles: dict[str, _Tally] = {}
 
-    def record_failed_call(self, scope: str | None) -> None:
+    def _tallies(self, owner: str | None, role: str | None) -> list[_Tally]:
+        tallies = [self._owners.setdefault(owner, _Tally())]
+        if role is not None:
+            tallies.append(self._roles.setdefault(role, _Tally()))
+        return tallies
+
+    def record_failed_call(self, scope: str | None, role: str | None = None) -> None:
         """Count a model call that failed, which still used a step."""
-        self._models[scope] += 1
+        for tally in self._tallies(scope, role):
+            tally.model_calls += 1
 
     def record_reply(
-        self, scope: str | None, calls: Iterable[ToolCall], known_tools: Collection[str]
+        self,
+        scope: str | None,
+        calls: Iterable[ToolCall],
+        known_tools: Collection[str],
+        role: str | None = None,
+        cost_usd: float | None = None,
     ) -> None:
-        """Count one model call and its tool calls.
+        """Count one model call, its cost and its tool calls.
 
         A model can invent tool names and they aren't safe to store, so those count as unknown.
         """
@@ -68,22 +95,31 @@ class StatsCollector:
             owner = scope or workflow_of(call.arguments)
             owners.add(owner)
             name = call.name if call.name in known_tools else UNKNOWN_TOOL
-            self._tools.setdefault(owner, Counter())[name] += 1
-        self._models[owners.pop() if scope is None and len(owners) == 1 else scope] += 1
-
-    def _counts(self, owner: str | None) -> CallCounts:
-        tools = self._tools.get(owner, Counter())
-        return CallCounts(model_calls=self._models[owner], tool_calls=dict(sorted(tools.items())))
+            for tally in self._tallies(owner, role):
+                tally.tools[name] += 1
+        model_owner = owners.pop() if scope is None and len(owners) == 1 else scope
+        for tally in self._tallies(model_owner, role):
+            tally.model_calls += 1
+            tally.cost_usd += cost_usd or 0.0
 
     def snapshot(self, stop_reason: str | None = None) -> RunStats:
         """Return the counts so far."""
-        named = {owner for owner in [*self._models, *self._tools] if owner is not None}
+        tallies = list(self._owners.values())
         return RunStats(
-            run=self._counts(None),
-            workflows={owner: self._counts(owner) for owner in sorted(named)},
+            run=self._owners.get(None, _Tally()).counts(),
+            workflows={
+                owner: tally.counts()
+                for owner, tally in sorted(
+                    (item for item in self._owners.items() if item[0] is not None),
+                    key=lambda item: str(item[0]),
+                )
+                if owner is not None
+            },
+            roles={role: self._roles[role].counts() for role in sorted(self._roles)},
             total=StatsTotal(
-                model_calls=sum(self._models.values()),
-                tool_calls=sum(sum(tools.values()) for tools in self._tools.values()),
+                model_calls=sum(tally.model_calls for tally in tallies),
+                tool_calls=sum(sum(tally.tools.values()) for tally in tallies),
+                cost_usd=sum(tally.cost_usd for tally in tallies),
                 limit=self.limit,
             ),
             spec_hash=self.spec_hash,

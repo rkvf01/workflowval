@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import socket
 import subprocess
 import sys
@@ -12,12 +13,10 @@ import pytest
 from pytest_socket import SocketBlockedError
 
 import workflowval
-from workflowval.gen import generate
-from workflowval.planner import plan
 from workflowval.prompts import load_prompt, prompt_version
 from workflowval.report import write_reports
-from workflowval.schemas import RunResults, Workflow
-from workflowval.spec import SpecGraph, validate_response
+from workflowval.schemas import RunResults
+from workflowval.spec import validate_response
 from workflowval.triage import classify
 
 SOURCE = Path(workflowval.__file__).parent
@@ -69,7 +68,19 @@ def test_network_is_blocked_during_unit_tests() -> None:
         socket.socket(socket.AF_INET).connect(("127.0.0.1", 9))
 
 
-@pytest.mark.parametrize("name", ["planner", "reviewer", "writer"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "planner",
+        "reviewer",
+        "writer",
+        "task_plan",
+        "task_plan_gaps",
+        "task_triage",
+        "task_fix_workflow",
+        "task_fix_test",
+    ],
+)
 def test_prompts_have_version_headers(name: str) -> None:
     assert prompt_version(name) >= 1
     assert "version:" not in load_prompt(name)
@@ -85,27 +96,22 @@ def test_a_prompt_without_a_header_is_refused(
         loader("bad")  # type: ignore[operator]
 
 
+def test_no_model_name_is_written_into_the_code() -> None:
+    # The model is chosen on the command line or in an env var, never in code or prompts.
+    pattern = re.compile(r"\b(openrouter|anthropic|openai|gemini|ollama)/[a-z0-9]")
+    for path in SOURCE.rglob("*"):
+        if path.suffix in {".py", ".md", ".tmpl"}:
+            assert not pattern.search(path.read_text()), path
+
+
 def test_style_rules_live_in_one_place() -> None:
     assert (SOURCE / "gen" / "style.md").is_file()
-
-
-WORKFLOW = Workflow.model_validate(
-    {
-        "id": "a",
-        "source": "planner",
-        "basis": "assumed",
-        "rule": "r",
-        "steps": [{"op": "o", "expect": {"status": 200}}],
-    }
-)
 
 
 @pytest.mark.parametrize(
     ("call", "milestone"),
     [
-        (lambda: generate(WORKFLOW), "M1"),
-        (lambda: plan(SpecGraph(), []), "M1"),
-        (lambda: validate_response("op", None), "M1"),
+        (lambda: validate_response("op", None), "M2"),
         (lambda: classify(None), "M2"),  # type: ignore[arg-type]
         (lambda: write_reports(RunResults(stop_reason="completed")), "M2"),
     ],

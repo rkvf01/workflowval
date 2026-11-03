@@ -12,6 +12,9 @@ from pydantic import Field, field_validator, model_validator
 from workflowval.schemas._base import Strict
 
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_]\w*)\}")
+_JSON_PATH = re.compile(r"\$(\.[A-Za-z_][\w-]*|\[\d+\])*")
+BUILTIN_VALUES = frozenset({"unique", "unique_int"})
+"""Placeholders always available: fresh values per test run, so runs don't collide (FR-5)."""
 
 
 class Source(StrEnum):
@@ -39,8 +42,8 @@ class Expect(Strict):
     @classmethod
     def _body_keys_are_jsonpath(cls, value: dict[str, Any]) -> dict[str, Any]:
         for key in value:
-            if not key.startswith("$"):
-                raise ValueError(f"expect.body key must be a JSONPath starting with '$': {key!r}")
+            if not _JSON_PATH.fullmatch(key):
+                raise ValueError(f"expect.body key must be a JSONPath like $.a.b[0]: {key!r}")
         return value
 
 
@@ -67,8 +70,8 @@ class Step(CleanupStep):
     @classmethod
     def _save_values_are_jsonpath(cls, value: dict[str, str]) -> dict[str, str]:
         for name, path in value.items():
-            if not path.startswith("$"):
-                raise ValueError(f"save[{name!r}] must be a JSONPath starting with '$': {path!r}")
+            if not _JSON_PATH.fullmatch(path):
+                raise ValueError(f"save[{name!r}] must be a JSONPath like $.a.b[0]: {path!r}")
         return value
 
 
@@ -104,7 +107,7 @@ class Workflow(Strict):
     def _check(self) -> Workflow:
         if self.locked and self.source is not Source.USER:
             raise ValueError("only workflows with source 'user' can be locked")
-        saved: set[str] = set()
+        saved = set(BUILTIN_VALUES)
         for index, step in enumerate(self.steps):
             self._require_saved(_placeholders([step.params, step.body]), saved, f"steps[{index}]")
             saved |= set(step.save)
