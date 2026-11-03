@@ -325,3 +325,11 @@ def test_each_model_keeps_its_runs_apart_inside_the_ignored_folder() -> None:
     )
     assert bench.LEDGER.parent in first.parents
     assert "/" not in first.name
+
+
+def test_a_run_that_failed_at_once_does_not_set_the_price(tmp_path: Path) -> None:
+    for name, cost in (("round-1-buggy", 0.0), ("round-2-buggy", 1.5)):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "results.json").write_text(json.dumps({"cost_usd": cost}))
+    assert bench.setup_costs(tmp_path) == [1.5]

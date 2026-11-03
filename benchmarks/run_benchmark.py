@@ -289,9 +289,10 @@ def next_run_is_allowed(costs: list[float], limit: float, setup_costs: list[floa
 
 def setup_costs(folder: Path) -> list[float]:
     """What this setup's saved runs cost."""
-    return [
+    costs = [
         json.loads(path.read_text())["cost_usd"] for path in folder.glob("round-*/results.json")
     ]
+    return [cost for cost in costs if cost > 0]  # A run that failed at once says nothing of price.
 
 
 def _record(build: str, round_number: int, results: dict[str, Any]) -> None:
@@ -492,6 +493,9 @@ def main() -> int:
                 args.max_steps,
                 args.max_cost_usd,
             )
+            if results["stop_reason"] == "model_error":
+                print(f"Stopping: {build} round {number} hit a model error, so no score is valid.")
+                return 3
             if results["stop_reason"] != "completed":
                 print(f"WARNING: {build} round {number} stopped early: {results['stop_reason']}")
             if results.get("unpriced_calls"):
