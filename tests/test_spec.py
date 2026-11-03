@@ -174,3 +174,36 @@ def test_absolute_server_urls_contribute_their_path() -> None:
 
 def test_no_servers_leaves_the_base_url_alone() -> None:
     assert resolve_base_url("http://h:1/", build_graph(minimal())) == "http://h:1"
+
+
+def _security_spec(**operation: Any) -> dict[str, Any]:
+    return {
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "security": [{"bearerAuth": []}],
+        "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+        "paths": {
+            "/x": {
+                "get": {
+                    "operationId": "op",
+                    "responses": {"200": {"description": "ok"}},
+                    **operation,
+                }
+            }
+        },
+    }
+
+
+def test_an_operation_inherits_the_specs_security() -> None:
+    operation = build_graph(_security_spec()).operation("op")
+    assert operation is not None
+    assert operation.security == ["bearerAuth"]
+
+
+def test_an_operation_can_turn_security_off_or_replace_it() -> None:
+    open_operation = build_graph(_security_spec(security=[])).operation("op")
+    assert open_operation is not None
+    assert open_operation.security == []
+    other = build_graph(_security_spec(security=[{"apiKey": []}])).operation("op")
+    assert other is not None
+    assert other.security == ["apiKey"]

@@ -81,7 +81,11 @@ def _json_schema(content: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _build_operation(
-    path: str, method: str, raw: dict[str, Any], inherited: list[Any]
+    path: str,
+    method: str,
+    raw: dict[str, Any],
+    inherited: list[Any],
+    default_security: list[dict[str, Any]],
 ) -> Operation:
     merged = {(p["name"], p["in"]): p for p in [*inherited, *raw.get("parameters", [])]}
     segments = [part for part in path.split("/") if part and not part.startswith("{")]
@@ -111,7 +115,8 @@ def _build_operation(
         ],
         request_schema=_json_schema(request.get("content")) if request else None,
         responses=responses,
-        security=[name for option in raw.get("security", []) for name in option],
+        # An operation's own `security` replaces the spec's, and an empty list means no auth at all.
+        security=[name for option in raw.get("security", default_security) for name in option],
     )
 
 
@@ -167,7 +172,11 @@ def build_graph(spec: dict[str, Any]) -> SpecGraph:
         for method in _METHODS:
             if method in item:
                 inherited = item.get("parameters", [])
-                operations.append(_build_operation(path, method, item[method], inherited))
+                operations.append(
+                    _build_operation(
+                        path, method, item[method], inherited, spec.get("security", [])
+                    )
+                )
     servers = spec.get("servers") or [{}]
     return SpecGraph(
         title=spec.get("info", {}).get("title", ""),
