@@ -76,6 +76,16 @@ GRAPH = SpecGraph(
             parameters=[Parameter(name="id", location="path", required=True)],
         ),
         Operation(operation_id="listPets", method="GET", path="/pet", resource="pet"),
+        Operation(operation_id="addPet", method="POST", path="/pet", resource="pet"),
+        Operation(operation_id="updatePet", method="PUT", path="/pet", resource="pet"),
+        Operation(
+            operation_id="deletePet",
+            method="DELETE",
+            path="/pet/{id}",
+            resource="pet",
+            parameters=[Parameter(name="id", location="path", required=True)],
+        ),
+        Operation(operation_id="addNote", method="POST", path="/note", resource="note"),
     ]
 )
 
@@ -448,3 +458,58 @@ def test_the_model_cannot_declare_a_test_unresolved(tmp_path: Path) -> None:
     write(tmp_path)
     with pytest.raises(ToolError, match="UNRESOLVED"):
         verdict(tmp_path, label="UNRESOLVED")
+
+
+def add_pet(**changes: Any) -> dict[str, Any]:
+    return {"op": "addPet", "save": {"pet": "$.id"}, "expect": {"status": 200}, **changes}
+
+
+CLEANUP = [{"op": "deletePet", "params": {"id": "{pet}"}}]
+
+
+def write_steps(tmp_path: Path, steps: list[dict[str, Any]], cleanup: list[Any]) -> str:
+    workflow = {**WORKFLOW, "steps": steps, "cleanup": cleanup}
+    return TOOLS["write_workflow"].invoke({"workflow": workflow}, spec_context(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("steps", "cleanup", "message"),
+    [
+        ([{"op": "deletePet", "params": {"id": 500}, "expect": {"status": 200}}], [], "fixed"),
+        ([{"op": "deletePet", "params": {"id": "500"}, "expect": {"status": 404}}], [], "fixed"),
+        ([add_pet()], [{"op": "deletePet", "params": {"id": 500}}], "fixed value"),
+        ([add_pet(body={"id": 500})], CLEANUP, "fixed id"),
+        ([add_pet(body=[{"id": 500}])], CLEANUP, "fixed id"),
+        ([{"op": "updatePet", "body": {"id": 5}, "expect": {"status": 200}}], [], "fixed id"),
+        ([add_pet()], [], "add a `cleanup` step"),
+    ],
+)
+def test_workflows_may_only_touch_their_own_data(
+    steps: list[dict[str, Any]], cleanup: list[Any], message: str, tmp_path: Path
+) -> None:
+    with pytest.raises(ToolError, match=message):
+        write_steps(tmp_path, steps, cleanup)
+    assert not (tmp_path / "workflows").exists()
+
+
+@pytest.mark.parametrize(
+    ("steps", "cleanup"),
+    [
+        ([add_pet(body={"id": "{unique_int}"})], CLEANUP),
+        (
+            [
+                add_pet(),
+                {"op": "deletePet", "params": {"id": "{pet}"}, "expect": {"status": 200}},
+            ],
+            CLEANUP,
+        ),
+        ([{"op": "deletePet", "params": {"id": "{unique}"}, "expect": {"status": 404}}], []),
+        ([{"op": "getPet", "params": {"id": 500}, "expect": {"status": 404}}], []),
+        ([{"op": "addPet", "body": {"bad": 1}, "expect": {"status": 400}}], []),
+        ([{"op": "addNote", "expect": {"status": 200}}], []),
+    ],
+)
+def test_safe_workflows_are_accepted(
+    steps: list[dict[str, Any]], cleanup: list[Any], tmp_path: Path
+) -> None:
+    assert write_steps(tmp_path, steps, cleanup) == "wrote workflows/wf.json"

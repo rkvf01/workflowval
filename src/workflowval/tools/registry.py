@@ -31,6 +31,7 @@ from workflowval.schemas import (
     Workflow,
     atomic_write_text,
 )
+from workflowval.spec import SpecGraph
 from workflowval.tools.base import Tool, ToolContext, ToolError
 
 
@@ -247,6 +248,50 @@ def _check_against_spec(workflow: Workflow, context: ToolContext) -> None:
         )
         if missing:
             raise ToolError(f"{step.op} needs path parameters {missing}")
+    _check_only_touches_own_data(workflow, graph)
+
+
+def _is_generated(value: Any) -> bool:
+    """True when a value comes from a saved or unique placeholder, not a fixed literal."""
+    return isinstance(value, str) and "{" in value
+
+
+def _check_only_touches_own_data(workflow: Workflow, graph: SpecGraph) -> None:
+    """Enforce NFR-3: tests must never change or delete data they didn't create."""
+    writes = {"PUT", "PATCH", "DELETE"}
+    for step in [*workflow.steps, *workflow.cleanup]:
+        operation = graph.operation(step.op)
+        if operation is None:
+            continue
+        if operation.method in writes:
+            path_names = {p.name for p in operation.parameters if p.location == "path"}
+            for name in sorted(path_names & set(step.params)):
+                if not _is_generated(step.params[name]):
+                    raise ToolError(
+                        f"{step.op} changes data, so {name} must come from a saved value or "
+                        f"{{unique}}: a fixed value could hit data this test didn't create"
+                    )
+        items = step.body if isinstance(step.body, list) else [step.body]
+        for item in items:
+            if isinstance(item, dict) and "id" in item and not _is_generated(item["id"]):
+                raise ToolError(
+                    f"{step.op} sends a fixed id: use a saved value or {{unique_int}}, so it "
+                    "can't overwrite data this test didn't create"
+                )
+    deletable = {op.resource for op in graph.operations if op.method == "DELETE"}
+    if not workflow.cleanup:
+        for step in workflow.steps:
+            operation = graph.operation(step.op)
+            if (
+                operation is not None
+                and operation.method == "POST"
+                and step.expect.status < 400
+                and operation.resource in deletable
+            ):
+                raise ToolError(
+                    f"{step.op} creates data, so add a `cleanup` step that deletes it, even if a "
+                    "step deletes it too: a failed test must not leave data behind"
+                )
 
 
 def _expectation_changes(old: Workflow, new: Workflow) -> list[str]:

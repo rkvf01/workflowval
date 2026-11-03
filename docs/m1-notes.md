@@ -20,6 +20,8 @@
   and printed as `CHANGED`.
 - `--no-cost-tracking`, or `WORKFLOWVAL_COST_TRACKING=off`. `stats.json` also has cost per workflow and
   per role.
+- `write_workflow` refuses changes or deletes by a fixed value, a fixed `id` in a request body, and a
+  create with no cleanup when the resource can be deleted (NFR-3). Reads may use fixed values.
 - Generated tests get only the env vars they need, so provider keys never reach them.
 
 ## Known limits

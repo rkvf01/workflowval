@@ -402,7 +402,8 @@ def test_coverage_gaps_get_a_second_chance_then_are_reported(
         "source": "planner",
         "basis": "assumed",
         "rule": "Items can be created",
-        "steps": [{"op": "createItem", "expect": {"status": 201}}],
+        "steps": [{"op": "createItem", "save": {"item": "$.id"}, "expect": {"status": 201}}],
+        "cleanup": [{"op": "deleteItem", "params": {"id": "{item}"}}],
     }
     model = [call("write_workflow", workflow=only_create), DONE, DONE]
     cfg = config(items_api, tmp_path, model)
@@ -410,7 +411,7 @@ def test_coverage_gaps_get_a_second_chance_then_are_reported(
     planner: Any = cfg.models["planner"]
     follow_up = planner.requests[2][0][1].content
     assert "getItem" in follow_up
-    assert report.results.uncovered_operations == ["login", "getItem", "deleteItem"]
+    assert report.results.uncovered_operations == ["login", "getItem"]
 
 
 def test_a_planner_that_writes_nothing_stops_the_run(items_api: ItemsApi, tmp_path: Path) -> None:
