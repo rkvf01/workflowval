@@ -3,9 +3,10 @@
 Model-agnostic CLI agent that reads an OpenAPI spec, infers multi-step workflows, writes and runs
 pytest tests against a live API, and triages every failure as a test bug, an API bug or spec drift.
 
-**Status: M3.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`. Requirements
-are in `workflowreq.md`, decisions in `docs/m0-review.md`, and changes and known limits in `docs/m1-notes.md`,
-`docs/m2-notes.md` and `docs/m3-notes.md`.
+**Status: M4 in progress.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`.
+Requirements are in `workflowreq.md`, decisions in `docs/m0-review.md`, and changes and known limits in
+`docs/m1-notes.md`, `docs/m2-notes.md` and `docs/m3-notes.md`. `docs/drift-study.md` compares three
+implementations of one API.
 
 ## Quickstart
 
@@ -20,7 +21,8 @@ workflowval run tests/wf
 This writes `workflows/<id>.json`, `tests/wf/test_<id>.py` and `results.json` in the current folder,
 plus `report.md`, `junit.xml`, bug reports and spec patches in `reports/`.
 If the API needs a login, pass `--auth auth.json` to both `test` and `run`, and set the env vars that
-file names. See `benchmarks/targets.md` for the demo targets.
+file names. In a login config, a field like `user.email` nests the login body. See `benchmarks/targets.md` for
+the demo targets.
 
 ## What needs a model
 
@@ -75,6 +77,14 @@ workflowval run tests/wf --ci --ci-max-api-bugs 2
 `--read-only` sends no writes. A non-local host needs `--allow-remote`, then `--yes`, `--ci` or `--read-only`.
 Generated tests refuse any other host. `--ci` fails on anything unresolved, or on bugs above the limits. A killed
 `workflowval test` picks up at its last step when run again. See `docs/m3-notes.md`.
+
+`--max-cost-usd 2` stops a run before a model call could pass that cost, judging by the dearest call so far, so a
+much larger call can still go slightly over. A call with no known price also stops the run, since the limit
+can't be kept. Temporary provider errors, such as rate limits, are retried up to 5 times.
+
+Secrets are hidden in everything saved or sent to a model: known values, auth headers and fields with names like
+`token`. A hidden value isn't checked against the spec. `--no-redact` keeps recorded response bodies exact, and works
+only with a local API, since those bodies may hold real secrets. Everything else stays hidden.
 
 ## Develop
 

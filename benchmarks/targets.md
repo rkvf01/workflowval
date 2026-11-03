@@ -40,3 +40,21 @@ This starts the app itself, runs both builds and prints a table. It keeps total 
 Each setup's runs and scores are kept in their own folder under `.benchmark/m3/`, and `--review-rounds 0` turns
 the plan review off to compare the two. See
 `benchmarks/seeded/README.md`.
+
+## RealWorld Conduit
+
+The drift study in `docs/drift-study.md` used three backends. Run third-party code in containers, and
+publish ports to `127.0.0.1` only. Fetch the spec from
+[realworld-apps/realworld](https://github.com/realworld-apps/realworld) at `specs/api/openapi.yml`, and
+convert it to JSON.
+
+Register a practice user on each backend with `POST /api/users`, then:
+
+```
+export CONDUIT_EMAIL=... CONDUIT_PASS=...
+workflowval plan openapi.json
+workflowval test openapi.json --base-url http://127.0.0.1:18101/api --auth examples/conduit/auth.json --max-review-rounds 0 --max-cost-usd 0.50
+```
+
+To use one plan across backends, copy `workflows/`, `review.json` and `.workflowval/state.json` to a
+new folder for each backend, remove any `known_issue` marks from the workflows, and run the same `test` command there.
