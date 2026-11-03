@@ -43,6 +43,7 @@ Flags (see each command's --help for the ones it takes):
   --max-fix-attempts N        Fixes per test before UNRESOLVED (default 3)
   --max-iterations N          Test-run passes per run (default 10)
   --max-steps N               Model calls per run (default 200)
+  --max-cost-usd N            Stop before a model call could pass this cost (default: no limit)
   --read-only                 Block POST, PUT, PATCH and DELETE
   --allow-host HOST           Host that may be called (default: the base URL's host)
   --allow-remote              Allow hosts other than localhost
@@ -80,6 +81,10 @@ Iterations = Annotated[
     int, typer.Option("--max-iterations", min=1, help="Test-run passes per run.")
 ]
 Steps = Annotated[int, typer.Option("--max-steps", min=1, help="Model calls per run.")]
+MaxCost = Annotated[
+    float | None,
+    typer.Option("--max-cost-usd", min=0.0, help="Stop before a model call could pass this cost."),
+]
 ReadOnly = Annotated[bool, typer.Option("--read-only", help="Block POST, PUT, PATCH and DELETE.")]
 AllowHost = Annotated[
     list[str] | None,
@@ -232,6 +237,11 @@ def _build_models(
     return models
 
 
+def _check_cost_limit(max_cost_usd: float | None, tracked: bool) -> None:
+    if max_cost_usd is not None and not tracked:
+        raise typer.BadParameter("--max-cost-usd needs cost tracking, which is turned off")
+
+
 def _cost_tracked(no_cost_tracking: bool) -> bool:
     return not no_cost_tracking and os.environ.get("WORKFLOWVAL_COST_TRACKING", "") != "off"
 
@@ -306,6 +316,7 @@ def test_command(
     max_fix_attempts: FixAttempts = 3,
     max_iterations: Iterations = 10,
     max_steps: Steps = 200,
+    max_cost_usd: MaxCost = None,
     read_only: ReadOnly = False,
     allow_host: AllowHost = None,
     allow_remote: AllowRemote = False,
@@ -332,6 +343,7 @@ def test_command(
     auth_config = _load_auth(auth)
     _check_auth_env(auth_config)
     tracked = _cost_tracked(no_cost_tracking)
+    _check_cost_limit(max_cost_usd, tracked)
     outcome = _run_pipeline(
         TestConfig(
             spec_source=spec,
@@ -343,6 +355,7 @@ def test_command(
                 max_fix_attempts=max_fix_attempts,
                 max_iterations=max_iterations,
                 max_steps=max_steps,
+                max_cost_usd=max_cost_usd,
             ),
             docs_dir=docs,
             auth=auth_config,
@@ -370,6 +383,7 @@ def plan_command(
     role_model: RoleModel = None,
     max_review_rounds: ReviewRounds = 2,
     max_steps: Steps = 200,
+    max_cost_usd: MaxCost = None,
     verbose: Verbose = False,
     seed: Seed = None,
     temperature: Temperature = None,
@@ -378,13 +392,18 @@ def plan_command(
     """Write reviewable workflows/<id>.json files and stop."""
     choice = resolve_models(model, role_model)
     tracked = _cost_tracked(no_cost_tracking)
+    _check_cost_limit(max_cost_usd, tracked)
     outcome = _run_pipeline(
         TestConfig(
             spec_source=spec,
             base_url="http://localhost",
             workdir=Path.cwd(),
             models=_build_models(choice, seed, temperature, tracked),
-            budget=Budget(max_review_rounds=max_review_rounds, max_steps=max_steps),
+            budget=Budget(
+                max_review_rounds=max_review_rounds,
+                max_steps=max_steps,
+                max_cost_usd=max_cost_usd,
+            ),
             docs_dir=docs,
             plan_only=True,
             verbose=verbose,
@@ -466,6 +485,7 @@ def drift_command(
     model: ModelOpt = None,
     role_model: RoleModel = None,
     max_steps: Steps = 200,
+    max_cost_usd: MaxCost = None,
     read_only: ReadOnly = False,
     allow_host: AllowHost = None,
     allow_remote: AllowRemote = False,
@@ -488,6 +508,7 @@ def drift_command(
     )
     auth_config = _load_auth(auth)
     _check_auth_env(auth_config)
+    _check_cost_limit(max_cost_usd, _cost_tracked(False))
     outcome = _run_with(
         run_drift_pipeline,
         TestConfig(
@@ -495,7 +516,7 @@ def drift_command(
             base_url=base_url,
             workdir=Path.cwd(),
             models=_build_models(choice, seed, temperature, _cost_tracked(False)),
-            budget=Budget(max_steps=max_steps),
+            budget=Budget(max_steps=max_steps, max_cost_usd=max_cost_usd),
             auth=auth_config,
             reports_dir=report,
             read_only=read_only,

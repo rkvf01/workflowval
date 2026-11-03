@@ -30,6 +30,7 @@ class StopReason(StrEnum):
     COMPLETED = "completed"
     MAX_ITERATIONS = "max_iterations"
     MAX_STEPS = "max_steps"
+    MAX_COST = "max_cost"
     NO_PROGRESS = "no_progress"
     INVALID_OUTPUT = "invalid_output"
     MODEL_ERROR = "model_error"
@@ -45,6 +46,7 @@ class Budget:
     max_iterations: int = 10
     max_steps: int = 200
     no_progress_limit: int = 3
+    max_cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +185,7 @@ class RunContext:
 
     def __post_init__(self) -> None:
         self.stats = StatsCollector(self.budget.max_steps, self.state.spec_hash)
+        self.dearest_call_usd = 0.0
 
     @property
     def state_path(self) -> Path:
@@ -264,6 +267,7 @@ class RunContext:
     ) -> Reply:
         if self.state.steps_used >= self.budget.max_steps:
             raise StopRun(StopReason.MAX_STEPS, f"used all {self.budget.max_steps} steps")
+        self._check_cost_limit()
         self.state.steps_used += 1
         try:
             reply = role.model.complete(messages, specs)
@@ -285,6 +289,21 @@ class RunContext:
         )
         return reply
 
+    def _check_cost_limit(self) -> None:
+        """Stop before a call that could pass the limit, judging by the dearest call so far."""
+        limit = self.budget.max_cost_usd
+        if limit is None:
+            return
+        if self.state.unpriced_calls:
+            raise StopRun(
+                StopReason.MAX_COST, "a call had no known price, so the cost limit can't be kept"
+            )
+        if self.state.cost_usd + self.dearest_call_usd > limit:
+            raise StopRun(
+                StopReason.MAX_COST,
+                f"spent ${self.state.cost_usd:.4f}; another call could pass the ${limit:.2f} limit",
+            )
+
     def _add_usage(self, usage: Usage) -> None:
         self.state.input_tokens += usage.input_tokens
         self.state.output_tokens += usage.output_tokens
@@ -292,6 +311,7 @@ class RunContext:
             self.state.unpriced_calls += 1
         else:
             self.state.cost_usd += usage.cost_usd
+            self.dearest_call_usd = max(self.dearest_call_usd, usage.cost_usd)
 
     def _call_tool(self, role: Role, tools: dict[str, Tool], call: ToolCall) -> tuple[str, bool]:
         """Return the text for the model, and whether the call counts as invalid output."""

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,28 @@ def _load_litellm() -> Any:
     import litellm
 
     return litellm
+
+
+# Seconds to wait before each new try. A temporary provider error shouldn't end a whole run.
+RETRY_DELAYS = (2.0, 4.0, 8.0, 16.0, 32.0)
+_TEMPORARY_ERRORS = frozenset(
+    {
+        "APIConnectionError",
+        "APITimeoutError",
+        "InternalServerError",
+        "RateLimitError",
+        "ServiceUnavailableError",
+        "Timeout",
+    }
+)
+
+
+def _is_temporary(exc: Exception) -> bool:
+    """True for rate limits, provider outages and dropped connections, which may clear."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
+    return type(exc).__name__ in _TEMPORARY_ERRORS
 
 
 def _to_wire(message: Message) -> dict[str, Any]:
@@ -56,6 +79,7 @@ class LiteLLMModel:
     seed: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     track_cost: bool = True
+    sleep: Callable[[float], None] = time.sleep
 
     def complete(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> Reply:
         """Call the provider and translate its reply. Failures raise a redacted ModelError."""
@@ -83,12 +107,7 @@ class LiteLLMModel:
             params["temperature"] = self.temperature
         if self.seed is not None:
             params["seed"] = self.seed
-        try:
-            response = litellm.completion(**params)
-        except Exception as exc:
-            # "from None": a chained provider exception could carry request headers.
-            detail = redact_text(str(exc))
-            raise ModelError(f"{self.name}: {type(exc).__name__}: {detail}") from None
+        response = self._call_with_retries(litellm, params)
         message = response.choices[0].message
         usage = getattr(response, "usage", None)
         input_tokens = getattr(usage, "prompt_tokens", 0) or 0
@@ -102,6 +121,19 @@ class LiteLLMModel:
                 cost_usd=self._cost(litellm, response, input_tokens + output_tokens),
             ),
         )
+
+    def _call_with_retries(self, litellm: Any, params: dict[str, Any]) -> Any:
+        delays = iter(RETRY_DELAYS)
+        while True:
+            try:
+                return litellm.completion(**params)
+            except Exception as exc:
+                delay = next(delays, None) if _is_temporary(exc) else None
+                if delay is None:
+                    # "from None": a chained provider exception could carry request headers.
+                    detail = redact_text(str(exc))
+                    raise ModelError(f"{self.name}: {type(exc).__name__}: {detail}") from None
+            self.sleep(delay)
 
     def _cost(self, litellm: Any, response: Any, tokens: int) -> float | None:
         """Prefer the price the provider reported, since LiteLLM's estimate can be wrongly 0."""

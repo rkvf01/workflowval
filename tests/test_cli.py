@@ -115,3 +115,13 @@ def test_bad_model_settings_are_refused(
 ) -> None:
     with pytest.raises(typer.BadParameter, match=message):
         resolve_models(model, roles, env)
+
+
+@pytest.mark.parametrize(
+    "command", [["test", "s.json", "--base-url", "http://localhost"], ["plan", "s.json"]]
+)
+def test_a_cost_limit_needs_cost_tracking(command: list[str]) -> None:
+    extra = ["--max-cost-usd", "1", "--no-cost-tracking", "--model", "a/b"]
+    result = CliRunner().invoke(app, [*command, *extra])
+    assert result.exit_code == 2
+    assert "needs cost tracking" in result.output
