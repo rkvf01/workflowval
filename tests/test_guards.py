@@ -14,10 +14,6 @@ from pytest_socket import SocketBlockedError
 
 import workflowval
 from workflowval.prompts import load_prompt, prompt_version
-from workflowval.report import write_reports
-from workflowval.schemas import RunResults
-from workflowval.spec import validate_response
-from workflowval.triage import classify
 
 SOURCE = Path(workflowval.__file__).parent
 PROVIDER_LIBRARIES = {
@@ -106,16 +102,3 @@ def test_no_model_name_is_written_into_the_code() -> None:
 
 def test_style_rules_live_in_one_place() -> None:
     assert (SOURCE / "gen" / "style.md").is_file()
-
-
-@pytest.mark.parametrize(
-    ("call", "milestone"),
-    [
-        (lambda: validate_response("op", None), "M2"),
-        (lambda: classify(None), "M2"),  # type: ignore[arg-type]
-        (lambda: write_reports(RunResults(stop_reason="completed")), "M2"),
-    ],
-)
-def test_later_milestone_modules_say_when_they_arrive(call: object, milestone: str) -> None:
-    with pytest.raises(NotImplementedError, match=milestone):
-        call()  # type: ignore[operator]

@@ -43,6 +43,9 @@ class TestStatus(StrEnum):
     XPASSED = "xpassed"
 
 
+_OK_STATUSES = frozenset({TestStatus.PASSED, TestStatus.XFAILED})
+
+
 class ActionKind(StrEnum):
     """What was done about a failure."""
 
@@ -92,6 +95,23 @@ class Verdict(Strict):
     )
 
 
+class Finding(Strict):
+    """A response that breaks the spec, once however many tests saw it (FR-8, FR-10).
+
+    `label` is None until the Reviewer rules on it. `TEST_BUG` means it ruled this isn't a real
+    problem, for example a spec that's merely loose.
+    """
+
+    id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    operations: list[str] = Field(default_factory=list)
+    tests: list[str] = Field(default_factory=list)
+    label: Label | None = None
+    confidence: Confidence | None = None
+    reason: str | None = None
+    action: Action = Field(default_factory=lambda: Action(kind=ActionKind.NONE))
+
+
 class TestResult(Strict):
     """The result of one test, keeping the last 3 HTTP exchanges (FR-6)."""
 
@@ -125,6 +145,11 @@ class RunResults(Strict):
     stop_reason: str
     stop_detail: str | None = None
     tests: list[TestResult] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
+    tasks_stopped: list[str] = Field(
+        default_factory=list,
+        description="Tasks that hit their call limit, so may be incomplete",
+    )
     uncovered_operations: list[str] = Field(
         default_factory=list, description="Spec operations no workflow calls"
     )
@@ -133,9 +158,41 @@ class RunResults(Strict):
     cost_usd: float = Field(default=0.0, ge=0, description="Sum over calls with a known price")
     unpriced_calls: int = Field(default=0, ge=0, description="Calls missing from cost_usd")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _ignore_computed_fields(cls, data: Any) -> Any:
+        """`label_counts` is written for readers and computed again on load."""
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if key != "label_counts"}
+        return data
+
+    @property
+    def has_unexpected_failures(self) -> bool:
+        """True when a test failed in a way nobody has reviewed and marked as expected."""
+        return any(t.status not in _OK_STATUSES for t in self.tests)
+
+    def summary(self) -> str:
+        """One line of counts, keeping expected failures apart from passes."""
+        passed = sum(t.status is TestStatus.PASSED for t in self.tests)
+        parts = [f"{passed} passed"]
+        expected = Counter(
+            t.verdict.label.value
+            for t in self.tests
+            if t.status is TestStatus.XFAILED and t.verdict is not None
+        )
+        parts += [f"{n} expected to fail ({label})" for label, n in sorted(expected.items())]
+        failed = len(self.tests) - passed - sum(expected.values())
+        if failed:
+            parts.append(f"{failed} failed")
+        confirmed = sum(f.label not in {None, Label.TEST_BUG} for f in self.findings)
+        if confirmed:
+            parts.append(f"{confirmed} spec mismatch{'es' if confirmed > 1 else ''}")
+        return ", ".join(parts)
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def label_counts(self) -> dict[str, int]:
         """Number of tests per label."""
         labels = [t.verdict.label.value for t in self.tests if t.verdict is not None]
+        labels += [f.label.value for f in self.findings if f.label not in {None, Label.TEST_BUG}]
         return dict(Counter(labels))

@@ -1,7 +1,8 @@
-<!-- version: 2 -->
+<!-- version: 3 -->
 This test failed: <<test_id>>
 Its workflow: <<workflow_id>>
 Failure: <<failure>>
+Automatic checks: <<hint>>
 Credentials configured for this run: <<credentials>>
 
 Read the workflow with `read_workflows`, the result with `read_results` and the operations with

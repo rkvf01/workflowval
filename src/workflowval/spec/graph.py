@@ -55,6 +55,14 @@ class SpecGraph(BaseModel):
     links: list[Link] = Field(default_factory=list)
     security_schemes: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
+    def operation_at(self, method: str, path: str) -> Operation | None:
+        """Find an operation by its method and path template."""
+        wanted = method.upper()
+        return next(
+            (op for op in self.operations if op.path == path and op.method.upper() == wanted),
+            None,
+        )
+
     def operation(self, operation_id: str) -> Operation | None:
         """Find an operation by its id."""
         return next((op for op in self.operations if op.operation_id == operation_id), None)

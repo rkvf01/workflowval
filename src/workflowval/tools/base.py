@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from workflowval.models.base import ToolSpec
+from workflowval.schemas import AuthConfig
 from workflowval.spec import SpecGraph
 
 
@@ -24,6 +25,9 @@ class ToolContext:
     workdir: Path
     graph: SpecGraph | None = None
     docs_dir: Path | None = None
+    reports_dir: Path | None = None
+    raw_spec: dict[str, Any] | None = None
+    auth: AuthConfig | None = None
 
 
 @dataclass(frozen=True)

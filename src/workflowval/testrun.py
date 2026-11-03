@@ -31,11 +31,24 @@ class Outcome:
     failing_assertion: str | None = None
     stdout: str = ""
     exchanges: list[dict[str, Any]] = field(default_factory=list)
+    calls: list[dict[str, Any]] = field(default_factory=list)
+    steps_run: int = 0
+    known_issue: str | None = None
 
     @property
     def passed(self) -> bool:
         """True when the test passed."""
         return self.status == "passed"
+
+    @property
+    def expected(self) -> bool:
+        """True when the test hit the failure it was already reviewed for."""
+        return self.status == "xfailed"
+
+    @property
+    def looks_fixed(self) -> bool:
+        """True when a test marked as a known issue passed."""
+        return self.passed and self.known_issue is not None
 
 
 def test_id(workflow_id: str) -> str:

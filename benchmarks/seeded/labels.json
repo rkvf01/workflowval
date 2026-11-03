@@ -1,0 +1,104 @@
+{
+  "bugs": [
+    {
+      "id": "wrong_validation_status",
+      "description": "Creating an order with quantity 0 returns 400, not the 422 the spec gives",
+      "expected_label": "API_BUG",
+      "operations": [
+        "createOrder"
+      ]
+    },
+    {
+      "id": "missing_auth_check",
+      "description": "Shipping an order works with no bearer token",
+      "expected_label": "API_BUG",
+      "operations": [
+        "shipOrder"
+      ]
+    },
+    {
+      "id": "pagination_off_by_one",
+      "description": "Every page after the first skips one order",
+      "expected_label": "API_BUG",
+      "operations": [
+        "listOrders"
+      ]
+    },
+    {
+      "id": "cancel_after_shipped",
+      "description": "A shipped order can be cancelled, breaking a documented rule",
+      "expected_label": "API_BUG",
+      "operations": [
+        "cancelOrder"
+      ]
+    },
+    {
+      "id": "refund_after_partial_cancel",
+      "description": "After a partial cancel, a refund pays the original total, not the cancelled items' value",
+      "expected_label": "API_BUG",
+      "operations": [
+        "refundOrder"
+      ]
+    },
+    {
+      "id": "field_renamed",
+      "description": "Responses say total_amount_cents, while the spec says total_cents",
+      "expected_label": "SPEC_DRIFT",
+      "operations": [
+        "createOrder",
+        "getOrder",
+        "listOrders",
+        "payOrder",
+        "shipOrder",
+        "cancelOrder",
+        "refundOrder"
+      ]
+    },
+    {
+      "id": "extra_required_field",
+      "description": "The spec requires currency, and the API ignores it, accepting orders without one",
+      "expected_label": "SPEC_DRIFT",
+      "operations": [
+        "createOrder"
+      ]
+    },
+    {
+      "id": "date_format",
+      "description": "created_at is MM/DD/YYYY, while the spec says date-time",
+      "expected_label": "SPEC_DRIFT",
+      "operations": [
+        "createOrder",
+        "getOrder",
+        "listOrders",
+        "payOrder",
+        "shipOrder",
+        "cancelOrder",
+        "refundOrder"
+      ]
+    },
+    {
+      "id": "idempotency_ignored",
+      "description": "A retry with the same Idempotency-Key creates a second order",
+      "expected_label": "API_BUG",
+      "operations": [
+        "createOrder"
+      ]
+    },
+    {
+      "id": "empty_filter_500",
+      "description": "A list filter that matches nothing returns 500",
+      "expected_label": "API_BUG",
+      "operations": [
+        "listOrders"
+      ]
+    },
+    {
+      "id": "page_size_conflict",
+      "description": "The spec allows page_size up to 100, and the docs say 50",
+      "expected_label": "CONFLICT",
+      "operations": [
+        "listOrders"
+      ]
+    }
+  ]
+}

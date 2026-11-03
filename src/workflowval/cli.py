@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -14,8 +15,16 @@ import typer
 from workflowval import __version__
 from workflowval.loop import Budget, StopReason
 from workflowval.models import LiteLLMModel, Model
-from workflowval.pipeline import TestConfig, TestRunReport, auth_env_names, run_test_pipeline
-from workflowval.schemas import AuthConfig, load_json
+from workflowval.pipeline import (
+    TestConfig,
+    TestRunReport,
+    auth_env_names,
+    results_from_outcomes,
+    run_drift_pipeline,
+    run_test_pipeline,
+)
+from workflowval.report import write_reports
+from workflowval.schemas import AuthConfig, Label, RunResults, TestStatus, load_json
 from workflowval.spec import SpecError, build_graph, load_spec
 from workflowval.testrun import run_tests
 from workflowval.tools import ROLE_TOOLS
@@ -157,7 +166,7 @@ def _stub(command: str, milestone: str) -> None:
 
 def _refuse_unbuilt(**flags: bool | Path | None) -> None:
     """Refuse a flag that isn't built yet, rather than ignore a safety or reporting promise."""
-    milestones = {"read_only": "M3", "ci": "M3", "report": "M2"}
+    milestones = {"read_only": "M3", "ci": "M3"}
     for name, value in flags.items():
         if value:
             flag = "--" + name.replace("_", "-")
@@ -221,23 +230,38 @@ def _print_report(report: TestRunReport) -> None:
         verdict = test.verdict
         if verdict is None:
             typer.echo(f"PASSED      {test.workflow_id}")
+        elif test.status is TestStatus.XFAILED:
+            typer.echo(f"EXPECTED    {test.workflow_id} ({verdict.label.value}): {verdict.reason}")
         else:
             typer.echo(f"{verdict.label.value:<11} {test.workflow_id}: {verdict.reason}")
     for change in report.expectation_changes:
         typer.echo(f"CHANGED     {change}")
+    for fixed in report.looks_fixed:
+        typer.echo(f"LOOKS FIXED {fixed}")
+    typer.echo(report.results.summary())
     if report.results.uncovered_operations:
         operations = ", ".join(report.results.uncovered_operations)
         typer.echo(f"NOT COVERED {operations}")
+    for finding in report.results.findings:
+        label = finding.label.value if finding.label else "NOT REVIEWED"
+        if finding.label is not Label.TEST_BUG:
+            typer.echo(f"MISMATCH    {label}: {finding.message}")
+    for stopped in report.results.tasks_stopped:
+        typer.echo(f"LIMIT       {stopped}")
     typer.echo(report.run.summary)
     typer.echo(f"results: {report.results_path}")
 
 
-def _run_pipeline(config: TestConfig) -> TestRunReport:
+def _run_with(pipeline: Callable[[TestConfig], TestRunReport], config: TestConfig) -> TestRunReport:
     try:
-        return run_test_pipeline(config)
+        return pipeline(config)
     except SpecError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(2) from exc
+
+
+def _run_pipeline(config: TestConfig) -> TestRunReport:
+    return _run_with(run_test_pipeline, config)
 
 
 def _version(value: bool) -> None:
@@ -283,7 +307,7 @@ def test_command(
     no_cost_tracking: NoCost = False,
 ) -> None:
     """Plan workflows, write tests, run them against the API and triage every failure."""
-    _refuse_unbuilt(read_only=read_only, ci=ci, report=report)
+    _refuse_unbuilt(read_only=read_only, ci=ci)
     choice = resolve_models(model, role_model)
     check_host(base_url, allow_host, allow_remote=allow_remote, yes=yes)
     auth_config = _load_auth(auth)
@@ -303,6 +327,7 @@ def test_command(
             ),
             docs_dir=docs,
             auth=auth_config,
+            reports_dir=report,
             plan_only=plan_only,
             verbose=verbose,
             cost_tracked=tracked,
@@ -310,7 +335,7 @@ def test_command(
     )
     _print_report(outcome)
     clean = outcome.run.stop_reason is StopReason.COMPLETED
-    if not clean or any(test.verdict is not None for test in outcome.results.tests):
+    if not clean or outcome.results.has_unexpected_failures:
         raise typer.Exit(EXIT_FAILURES)
 
 
@@ -366,7 +391,7 @@ def run_command(
     verbose: Verbose = False,
 ) -> None:
     """Re-run existing tests without calling a model."""
-    _refuse_unbuilt(read_only=read_only, ci=ci, report=report)
+    _refuse_unbuilt(read_only=read_only, ci=ci)
     if not tests.is_dir():
         raise typer.BadParameter(f"no such folder: {tests}")
     if base_url:
@@ -378,9 +403,20 @@ def run_command(
         typer.echo(f"No tests found in {tests}", err=True)
         raise typer.Exit(EXIT_FAILURES)
     for outcome in outcomes:
-        detail = "" if outcome.passed else f": {outcome.failing_assertion}"
-        typer.echo(f"{outcome.status.upper():<11} {outcome.workflow_id}{detail}")
-    if not all(outcome.passed for outcome in outcomes):
+        if outcome.looks_fixed:
+            typer.echo(f"LOOKS FIXED {outcome.workflow_id}: {outcome.known_issue}")
+        elif outcome.expected:
+            typer.echo(f"EXPECTED    {outcome.workflow_id}: {outcome.known_issue}")
+        else:
+            detail = "" if outcome.passed else f": {outcome.failing_assertion}"
+            typer.echo(f"{outcome.status.upper():<11} {outcome.workflow_id}{detail}")
+    passed = sum(outcome.passed for outcome in outcomes)
+    expected = sum(outcome.expected for outcome in outcomes)
+    failed = len(outcomes) - passed - expected
+    typer.echo(f"{passed} passed, {expected} expected to fail, {failed} failed")
+    if report is not None:
+        write_reports(results_from_outcomes(outcomes, Path.cwd()), report)
+    if failed:
         raise typer.Exit(EXIT_FAILURES)
 
 
@@ -404,8 +440,29 @@ def drift_command(
     temperature: Temperature = None,
 ) -> None:
     """Check only whether the live API still matches its spec."""
-    resolve_models(model, role_model)
-    _stub("drift", "M2")
+    _refuse_unbuilt(read_only=read_only, ci=ci)
+    choice = resolve_models(model, role_model)
+    check_host(base_url, allow_host, allow_remote=allow_remote, yes=yes)
+    auth_config = _load_auth(auth)
+    _check_auth_env(auth_config)
+    outcome = _run_with(
+        run_drift_pipeline,
+        TestConfig(
+            spec_source=spec,
+            base_url=base_url,
+            workdir=Path.cwd(),
+            models=_build_models(choice, seed, temperature, _cost_tracked(False)),
+            budget=Budget(max_steps=max_steps),
+            auth=auth_config,
+            reports_dir=report,
+            verbose=verbose,
+            cost_tracked=_cost_tracked(False),
+        ),
+    )
+    _print_report(outcome)
+    drifted = any(f.label not in {None, Label.TEST_BUG} for f in outcome.results.findings)
+    if outcome.run.stop_reason is not StopReason.COMPLETED or drifted:
+        raise typer.Exit(EXIT_FAILURES)
 
 
 @app.command("inspect")
@@ -425,4 +482,11 @@ def report_command(
     report: Report = None,
 ) -> None:
     """Write report.md and JUnit XML from an earlier run's results."""
-    _stub("report", "M2")
+    if not results.is_file():
+        raise typer.BadParameter(f"no such file: {results}")
+    try:
+        run = load_json(RunResults, results)
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(f"{results} can't be read: {exc}") from exc
+    for path in write_reports(run, report or Path("reports")):
+        typer.echo(f"wrote {path}")

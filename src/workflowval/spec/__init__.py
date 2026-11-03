@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from workflowval.spec.graph import (
     Link,
     Operation,
@@ -12,25 +10,29 @@ from workflowval.spec.graph import (
     build_graph,
     resolve_base_url,
 )
-from workflowval.spec.loader import SpecError, load_spec, parse_spec, resolve_refs, spec_hash
-
-
-def validate_response(op: str, resp: Any) -> list[str]:
-    """Return the ways a live response breaks the spec. The one boundary around openapi-core."""
-    raise NotImplementedError("spec.validate_response arrives in M2")
-
+from workflowval.spec.loader import (
+    SpecError,
+    load_raw_spec,
+    load_spec,
+    parse_spec,
+    resolve_refs,
+    spec_hash,
+)
+from workflowval.spec.validation import ResponseChecker, SpecMismatch
 
 __all__ = [
     "Link",
     "Operation",
     "Parameter",
+    "ResponseChecker",
     "SpecError",
     "SpecGraph",
+    "SpecMismatch",
     "build_graph",
+    "load_raw_spec",
     "load_spec",
     "parse_spec",
     "resolve_base_url",
     "resolve_refs",
     "spec_hash",
-    "validate_response",
 ]

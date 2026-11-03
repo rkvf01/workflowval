@@ -56,6 +56,11 @@ def parse_spec(text: str, source: str) -> dict[str, Any]:
     return spec
 
 
+def load_raw_spec(source: str) -> dict[str, Any]:
+    """Load a spec as written, with its `$ref`s. Spec patches apply to this form."""
+    return parse_spec(read_spec_text(source), source)
+
+
 def load_spec(source: str) -> dict[str, Any]:
     """Load a spec from a path or URL, validated, with every `$ref` resolved."""
     return resolve_refs(parse_spec(read_spec_text(source), source))

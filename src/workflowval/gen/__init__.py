@@ -9,7 +9,7 @@ from typing import Any
 
 from workflowval.gen.source import SourceError, check_test_source, format_source, lint_source
 from workflowval.schemas import AuthConfig, LoginAuth, Workflow
-from workflowval.schemas.workflow import _PLACEHOLDER, CleanupStep, Step
+from workflowval.schemas.workflow import _PLACEHOLDER, CleanupStep, KnownIssue, Step
 from workflowval.spec import SpecGraph
 
 HASH_PREFIX = "# workflow-sha256: "
@@ -81,17 +81,21 @@ def _call_arguments(step: CleanupStep, graph: SpecGraph) -> str:
     return ", ".join(parts)
 
 
-def _render_step(step: Step, graph: SpecGraph) -> list[str]:
-    lines = [
-        f"response = api.call({_call_arguments(step, graph)})",
-        f"assert response.status_code == {step.expect.status}, response.text",
-    ]
-    lines += [f"saved[{k!r}] = api.value(response, {v!r})" for k, v in step.save.items()]
+def _render_step(step: Step, graph: SpecGraph, issue: KnownIssue | None = None) -> list[str]:
+    """Render one step. `issue` is set only on the step with a reviewed, expected failure."""
+    lines = [f"response = api.call({_call_arguments(step, graph)})"]
+    if issue is not None and issue.check == "status":
+        lines += [f"if response.status_code == {issue.status}:", "    api.expected_failure()"]
+    lines.append(f"assert response.status_code == {step.expect.status}, response.text")
+    checks = [f"saved[{k!r}] = api.value(response, {v!r})" for k, v in step.save.items()]
     for path, value in step.expect.body.items():
         # True, False and None compare by identity, so a truthy 1 can't pass as True.
         operator = "is" if value is None or isinstance(value, bool) else "=="
-        lines.append(f"assert api.value(response, {path!r}) {operator} {_expr(value)}")
-    return lines
+        checks.append(f"assert api.value(response, {path!r}) {operator} {_expr(value)}")
+    if issue is not None and issue.check == "body" and checks:
+        lines.append("with api.expected_failure_on_assert():")
+        return lines + [f"    {line}" for line in checks]
+    return lines + checks
 
 
 def _render_cleanup(step: CleanupStep, graph: SpecGraph) -> list[str]:
@@ -107,9 +111,16 @@ def _render_cleanup(step: CleanupStep, graph: SpecGraph) -> list[str]:
 
 def generate(workflow: Workflow, graph: SpecGraph) -> TestFile:
     """Render a workflow as one readable pytest file."""
-    body = [line for step in workflow.steps for line in _render_step(step, graph)]
+    issue = workflow.known_issue
+    body = [
+        line
+        for index, step in enumerate(workflow.steps)
+        for line in _render_step(step, graph, issue if issue and issue.step == index else None)
+    ]
     cleanup = [line for step in workflow.cleanup for line in _render_cleanup(step, graph)]
     lines = [hash_line(workflow), repr(workflow.rule), "", "", f"def test_{workflow.id}(api):"]
+    if issue is not None:
+        lines.append(f"    api.known_issue({f'{issue.label}: {issue.reason}'!r})")
     if "saved" in "\n".join([*body, *cleanup]):
         lines.append("    saved = {}")
     if cleanup:

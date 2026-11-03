@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from workflowval.loop.runner import (
+    TASK_CALL_LIMIT,
     Budget,
     CodeStep,
     FixLoop,
@@ -14,6 +15,7 @@ from workflowval.loop.runner import (
     RunResult,
     StopReason,
     StopRun,
+    TaskLimitReached,
     TestOutcome,
     run,
 )
@@ -33,6 +35,7 @@ def make_role(name: str, model: Model, only: frozenset[str] | None = None) -> Ro
 
 
 __all__ = [
+    "TASK_CALL_LIMIT",
     "Budget",
     "CodeStep",
     "FixLoop",
@@ -44,6 +47,7 @@ __all__ = [
     "RunResult",
     "StopReason",
     "StopRun",
+    "TaskLimitReached",
     "TestOutcome",
     "Tracer",
     "make_role",
