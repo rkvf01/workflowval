@@ -140,6 +140,40 @@ def test_adapter_tolerates_a_model_with_no_known_price(
     assert usage.input_tokens == 11
 
 
+def test_the_price_the_provider_reported_wins(
+    sent: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # LiteLLM's own estimate returned 0 for real OpenRouter calls, so it must not take priority.
+    monkeypatch.setattr(litellm, "completion_cost", lambda completion_response: 0.0)
+    response = wire_response()
+    response._hidden_params = {"response_cost": 0.003}
+    sent["response"] = response
+    assert LiteLLMModel("a/b").complete([], []).usage.cost_usd == 0.003
+
+
+def test_cost_can_come_from_the_usage_block(
+    sent: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(litellm, "completion_cost", lambda completion_response: 0.0)
+    response = wire_response()
+    response.usage.cost = 0.002
+    sent["response"] = response
+    assert LiteLLMModel("a/b").complete([], []).usage.cost_usd == 0.002
+
+
+def test_zero_cost_with_tokens_is_unknown_not_free(
+    sent: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(litellm, "completion_cost", lambda completion_response: 0.0)
+    assert LiteLLMModel("a/b").complete([], []).usage.cost_usd is None
+
+
+def test_cost_tracking_can_be_turned_off(sent: dict[str, Any]) -> None:
+    usage = LiteLLMModel("a/b", track_cost=False).complete([], []).usage
+    assert usage.cost_usd is None
+    assert usage.input_tokens == 11
+
+
 def test_provider_errors_are_wrapped_and_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail(**_: Any) -> Any:
         raise RuntimeError("401 for Authorization: Bearer abc123def456")
