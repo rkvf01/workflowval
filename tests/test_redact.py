@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from workflowval.redact import MASK, redact, redact_text
@@ -58,3 +60,35 @@ def test_containers_are_walked_by_key_and_value() -> None:
         "token_env": "BOOKER_TOKEN",
         "notes": [MASK, 3, [f"Cookie: {MASK}"]],
     }
+
+
+def test_a_json_body_stays_valid_and_keeps_its_error_message() -> None:
+    body = '{"errors": {"token": ["is missing"]}}'
+    assert json.loads(redact(body)) == {"errors": {"token": ["is missing"]}}
+    assert redact_text(body) == body
+
+
+def test_a_token_in_a_json_body_is_hidden_but_the_shape_stays() -> None:
+    out = json.loads(redact('{"user": {"token": "abc123def456", "bio": null, "name": "ann"}}'))
+    assert out == {"user": {"token": MASK, "bio": None, "name": "ann"}}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        (True, True),
+        (["abc123def456"], [MASK]),
+        (["is missing"], ["is missing"]),
+        ({"value": "abc123def456"}, {"value": MASK}),
+        (12345, MASK),
+    ],
+)
+def test_a_secret_field_keeps_its_shape(value: object, expected: object) -> None:
+    assert redact({"token": value}) == {"token": expected}
+
+
+def test_a_broken_json_body_is_still_redacted_as_text() -> None:
+    out = redact('{"token": "abc123def456"')
+    assert isinstance(out, str)
+    assert "abc123def456" not in out

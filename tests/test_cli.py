@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 import typer
@@ -125,3 +126,31 @@ def test_a_cost_limit_needs_cost_tracking(command: list[str]) -> None:
     result = CliRunner().invoke(app, [*command, *extra])
     assert result.exit_code == 2
     assert "needs cost tracking" in result.output
+
+
+@pytest.mark.parametrize("url", ["http://localhost:1", "http://127.0.0.1:1"])
+def test_no_redact_is_refused_only_for_a_remote_api(url: str) -> None:
+    remote = [
+        "test",
+        "s.json",
+        "--base-url",
+        "https://example.com",
+        "--model",
+        "a/b",
+        "--no-redact",
+    ]
+    result = runner.invoke(app, remote)
+    assert result.exit_code == 2
+    assert "only with a local API" in result.output
+    assert (
+        "only with a local API"
+        not in runner.invoke(
+            app, ["test", "s.json", "--base-url", url, "--model", "a/b", "--no-redact"]
+        ).output
+    )
+
+
+def test_no_redact_on_run_needs_a_base_url(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["run", str(tmp_path), "--no-redact"])
+    assert result.exit_code == 2
+    assert "needs --base-url" in result.output

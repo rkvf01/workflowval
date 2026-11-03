@@ -19,6 +19,7 @@ BASE_URL = os.environ.get("WORKFLOWVAL_BASE_URL", __BASE_URL__).rstrip("/")
 AUTH: dict[str, Any] | None = __AUTH__
 TIMEOUT_SECONDS = 30
 READ_ONLY = os.environ.get("WORKFLOWVAL_READ_ONLY") == "1"
+KEEP_RAW_BODIES = os.environ.get("WORKFLOWVAL_NO_REDACT") == "1"
 ALLOWED_HOSTS = {
     httpx.URL(BASE_URL).host,
     *filter(None, os.environ.get("WORKFLOWVAL_ALLOWED_HOSTS", "").split(",")),
@@ -278,11 +279,12 @@ def _exchange(response: httpx.Response) -> dict[str, Any]:
 
 def _call(response: httpx.Response) -> dict[str, Any]:
     """One request and its whole response, for checking against the spec."""
+    raw_body = response.content.decode("utf-8", errors="replace")
     return {
         **_exchange(response),
         "template": response.request.extensions.get("workflowval_template"),
         "content_type": response.headers.get("content-type"),
-        "raw_body": _mask(response.content.decode("utf-8", errors="replace"))[:_MAX_RAW_BODY],
+        "raw_body": (raw_body if KEEP_RAW_BODIES else _mask(raw_body))[:_MAX_RAW_BODY],
     }
 
 

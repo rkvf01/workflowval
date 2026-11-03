@@ -80,6 +80,17 @@ def _workflow_of_node(node_id: str) -> str | None:
     return stem.removeprefix("test_") if stem.startswith("test_") else None
 
 
+def _redacted(result: dict[str, Any], *, no_redact: bool) -> dict[str, Any]:
+    """Redact one test's result. --no-redact keeps only the recorded response bodies exact."""
+    cleaned: dict[str, Any] = redact(result)
+    if no_redact:
+        for original, call in zip(
+            result.get("calls") or (), cleaned.get("calls") or (), strict=True
+        ):
+            call["raw_body"] = original.get("raw_body")
+    return cleaned
+
+
 def run_tests(
     tests_dir: Path,
     *,
@@ -88,6 +99,7 @@ def run_tests(
     env_names: Collection[str] = (),
     read_only: bool = False,
     allowed_hosts: Collection[str] = (),
+    no_redact: bool = False,
 ) -> list[Outcome]:
     """Run tests and return one outcome per workflow. A test with no result counts as an error."""
     wanted = (
@@ -107,6 +119,8 @@ def run_tests(
             env["WORKFLOWVAL_BASE_URL"] = base_url
         if read_only:
             env["WORKFLOWVAL_READ_ONLY"] = "1"
+        if no_redact:
+            env["WORKFLOWVAL_NO_REDACT"] = "1"
         if allowed_hosts:
             env["WORKFLOWVAL_ALLOWED_HOSTS"] = ",".join(allowed_hosts)
         files = [f"test_{workflow_id}.py" for workflow_id in wanted]
@@ -138,7 +152,7 @@ def run_tests(
     for node_id, result in captured.items():
         workflow_id = _workflow_of_node(node_id)
         if workflow_id is not None:
-            outcomes[workflow_id] = Outcome(workflow_id, **redact(result))
+            outcomes[workflow_id] = Outcome(workflow_id, **_redacted(result, no_redact=no_redact))
     return [
         outcomes.get(w) or Outcome(w, "error", failing_assertion="pytest reported no result")
         for w in wanted

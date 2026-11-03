@@ -118,6 +118,7 @@ class TestConfig:
     auth: AuthConfig | None = None
     reports_dir: Path | None = None
     read_only: bool = False
+    no_redact: bool = False
     allowed_hosts: tuple[str, ...] = ()
     plan_only: bool = False
     verbose: bool = False
@@ -265,6 +266,7 @@ class _Session:
             env_names=auth_env_names(self.config.auth),
             read_only=self.config.read_only,
             allowed_hosts=self.config.allowed_hosts,
+            no_redact=self.config.no_redact,
         )
 
     def _save_progress(self) -> None:
