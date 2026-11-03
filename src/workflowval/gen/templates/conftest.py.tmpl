@@ -7,7 +7,8 @@ import os
 import re
 import secrets
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import quote
 
@@ -24,8 +25,11 @@ if AUTH and AUTH.get("type") == "api_key" and AUTH["location"] == "header":
 
 _secrets: set[str] = set()
 _exchanges: list[httpx.Response] = []
+_MAX_RAW_BODY = 200_000
 _recording = True
 _results: dict[str, dict[str, Any]] = {}
+_steps_run = 0
+_known_issue: str | None = None
 _PATH_PART = re.compile(r"\.([A-Za-z_][\w-]*)|\[(\d+)\]")
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_]\w*)\}")
 
@@ -146,6 +150,9 @@ class Api:
         auth: bool = True,
     ) -> httpx.Response:
         """Send one request. `auth=False` sends it without credentials."""
+        global _steps_run
+        if _recording:
+            _steps_run += 1
         url = template
         for name, value in (path or {}).items():
             url = url.replace("{" + name + "}", quote(str(value), safe=""))
@@ -154,7 +161,26 @@ class Api:
         options: dict[str, Any] = {"params": params, "headers": request_headers}
         if body is not None:
             options["json"] = body
-        return client.request(method, BASE_URL + url, **options)
+        return client.request(
+            method, BASE_URL + url, extensions={"workflowval_template": template}, **options
+        )
+
+    def known_issue(self, reason: str) -> None:
+        """Note that this test has a failure already reviewed as real."""
+        global _known_issue
+        _known_issue = reason
+
+    def expected_failure(self) -> None:
+        """End the test as an expected failure, with the reviewed reason."""
+        pytest.xfail(_known_issue or "known issue")
+
+    @contextmanager
+    def expected_failure_on_assert(self) -> Iterator[None]:
+        """Treat a failed check inside this block as the reviewed failure."""
+        try:
+            yield
+        except AssertionError:
+            self.expected_failure()
 
     def cleanup(self, method: str, template: str, **options: Any) -> None:
         """Remove test data. A failure here must not hide the test's own result."""
@@ -184,7 +210,10 @@ class Api:
 @pytest.fixture
 def api() -> Generator[Api, None, None]:
     """One API helper per test, with fresh unique values."""
+    global _steps_run, _known_issue
     _exchanges.clear()
+    _steps_run = 0
+    _known_issue = None
     with _make_client(authenticated=True) as client, _make_client(authenticated=False) as anon:
         yield Api(client, anon)
 
@@ -217,17 +246,30 @@ def _exchange(response: httpx.Response) -> dict[str, Any]:
     }
 
 
+def _call(response: httpx.Response) -> dict[str, Any]:
+    """One request and its whole response, for checking against the spec."""
+    return {
+        **_exchange(response),
+        "template": response.request.extensions.get("workflowval_template"),
+        "content_type": response.headers.get("content-type"),
+        "raw_body": _mask(response.content.decode("utf-8", errors="replace"))[:_MAX_RAW_BODY],
+    }
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     """Record each test's outcome and its last 3 HTTP exchanges."""
     if report.when == "call" or report.outcome == "failed":
         crash = getattr(report.longrepr, "reprcrash", None)
         message = crash.message if crash else str(report.longrepr or "")
         _results[report.nodeid] = {
-            "status": report.outcome,
+            "status": "xfailed" if hasattr(report, "wasxfail") else report.outcome,
             "duration_s": report.duration,
             "failing_assertion": _mask(message) if report.failed else None,
             "stdout": _mask(report.capstdout),
             "exchanges": [_exchange(response) for response in _exchanges[-3:]],
+            "calls": [_call(response) for response in _exchanges],
+            "steps_run": _steps_run,
+            "known_issue": _mask(_known_issue) if _known_issue else None,
         }
 
 
@@ -241,6 +283,13 @@ def pytest_collectreport(report: pytest.CollectReport) -> None:
             "stdout": "",
             "exchanges": [],
         }
+
+
+def pytest_terminal_summary(terminalreporter: Any) -> None:
+    """Say when a test marked as a known issue passed, so the bug may be fixed."""
+    for node_id, result in _results.items():
+        if result["status"] == "passed" and result.get("known_issue"):
+            terminalreporter.write_line(f"{node_id} passed; this may be fixed: {result['known_issue']}")
 
 
 def pytest_sessionfinish() -> None:

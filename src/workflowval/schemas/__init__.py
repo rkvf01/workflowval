@@ -8,6 +8,7 @@ from workflowval.schemas.results import (
     ActionKind,
     Confidence,
     Evidence,
+    Finding,
     HttpExchange,
     Label,
     RunResults,
@@ -18,7 +19,15 @@ from workflowval.schemas.results import (
 from workflowval.schemas.review import Answer, Decision, MissingJourney, Review, WorkflowFix
 from workflowval.schemas.state import RunState
 from workflowval.schemas.stats import CallCounts, RunStats, StatsTotal
-from workflowval.schemas.workflow import Basis, CleanupStep, Expect, Source, Step, Workflow
+from workflowval.schemas.workflow import (
+    Basis,
+    CleanupStep,
+    Expect,
+    KnownIssue,
+    Source,
+    Step,
+    Workflow,
+)
 
 __all__ = [
     "Action",
@@ -35,7 +44,9 @@ __all__ = [
     "Decision",
     "Evidence",
     "Expect",
+    "Finding",
     "HttpExchange",
+    "KnownIssue",
     "Label",
     "Labels",
     "LoginAuth",

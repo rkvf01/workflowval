@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -75,6 +75,27 @@ class Step(CleanupStep):
         return value
 
 
+class KnownIssue(Strict):
+    """A failure reviewed as real, which the test now expects. Written by code, never by a model.
+
+    It excuses only this check on this step: any other failure still fails the test.
+    """
+
+    label: Literal["API_BUG", "SPEC_DRIFT", "CONFLICT"]
+    confidence: Literal["low", "med", "high"]
+    reason: str = Field(min_length=1)
+    step: int = Field(ge=0, description="Index in `steps` of the step that fails")
+    check: Literal["status", "body"]
+    status: int | None = Field(default=None, description="The status seen, for a status check")
+    report: str | None = Field(default=None, description="The bug report or spec patch file")
+
+    @model_validator(mode="after")
+    def _status_check_names_a_status(self) -> KnownIssue:
+        if self.check == "status" and self.status is None:
+            raise ValueError("a status check must name the status it saw")
+        return self
+
+
 def _placeholders(value: Any) -> Iterator[str]:
     if isinstance(value, str):
         yield from _PLACEHOLDER.findall(value)
@@ -102,11 +123,14 @@ class Workflow(Strict):
     )
     steps: list[Step] = Field(min_length=1)
     cleanup: list[CleanupStep] = Field(default_factory=list)
+    known_issue: KnownIssue | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Workflow:
         if self.locked and self.source is not Source.USER:
             raise ValueError("only workflows with source 'user' can be locked")
+        if self.known_issue is not None and self.known_issue.step >= len(self.steps):
+            raise ValueError("known_issue.step isn't one of this workflow's steps")
         saved = set(BUILTIN_VALUES)
         for index, step in enumerate(self.steps):
             self._require_saved(_placeholders([step.params, step.body]), saved, f"steps[{index}]")

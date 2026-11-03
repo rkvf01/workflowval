@@ -11,3 +11,5 @@ build/
 .workflowval/
 .env
 .DS_Store
+.benchmark/
+reports/

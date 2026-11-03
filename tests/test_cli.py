@@ -61,24 +61,10 @@ def test_version() -> None:
 
 
 @pytest.mark.parametrize(
-    ("args", "milestone"),
-    [
-        (["drift", "spec.json", "--base-url", "https://sandbox.partner.com"], "M2"),
-        (["report", "results.json"], "M2"),
-    ],
-)
-def test_stubs_exit_non_zero_and_say_when_they_arrive(args: list[str], milestone: str) -> None:
-    result = runner.invoke(app, args)
-    assert result.exit_code == EXIT_NOT_IMPLEMENTED
-    assert f"not implemented yet; it arrives in {milestone}" in result.output
-
-
-@pytest.mark.parametrize(
     ("args", "flag"),
     [
         (["test", "s.json", "--base-url", "http://localhost", "--read-only"], "--read-only"),
         (["test", "s.json", "--base-url", "http://localhost", "--ci"], "--ci"),
-        (["test", "s.json", "--base-url", "http://localhost", "--report", "out"], "--report"),
         (["run", "tests/wf", "--ci"], "--ci"),
         (["run", "tests/wf", "--read-only"], "--read-only"),
     ],

@@ -13,6 +13,9 @@ FORBIDDEN_NAMES = frozenset(
     {"eval", "exec", "compile", "open", "__import__", "globals", "locals", "getattr", "setattr"}
 )
 FORBIDDEN_ATTRIBUTES = frozenset({"skip", "skipif", "xfail", "importorskip"})
+EXPECTED_FAILURE_CALLS = frozenset(
+    {"known_issue", "expected_failure", "expected_failure_on_assert"}
+)
 _RUFF_ARGS = ("--isolated", "--line-length", "100", "--stdin-filename", "test_generated.py")
 
 
@@ -85,6 +88,12 @@ def check_test_source(source: str, workflow: Workflow, previous: str | None = No
             raise SourceError(f"{node.id!r} isn't allowed in a generated test")
         if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRIBUTES:
             raise SourceError(f"pytest {node.attr} isn't allowed: a real failure must stay visible")
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in EXPECTED_FAILURE_CALLS
+            and workflow.known_issue is None
+        ):
+            raise SourceError(f"{node.attr} isn't allowed: only a reviewed failure can be expected")
     functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
     names = [function.name for function in functions if function.name.startswith("test")]
     expected = f"test_{workflow.id}"
