@@ -1,19 +1,29 @@
 """Every tool and which role may call it.
 
-The first 12 tools are the doc's list. `read_tests` and `write_verdict` are proposed additions, and
-`read_tests` for the Writer too; see docs/m0-review.md. Handlers other than `write_workflow` are
-stubs until their milestone.
+The first 12 tools are the doc's list. `read_tests` and `write_verdict` were added in the M0 review
+(docs/m0-review.md). Tools that raise "arrives in" are stubs until that milestone.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from workflowval.gen import (
+    SourceError,
+    check_test_source,
+    format_source,
+    hash_line,
+    lint_source,
+    test_path,
+)
 from workflowval.schemas import (
     Answer,
+    Basis,
     Confidence,
     Label,
     Review,
@@ -102,6 +112,10 @@ class WriteVerdictArgs(BaseModel):
     label: Label
     confidence: Confidence
     reason: str = Field(min_length=1)
+    fix_target: Literal["test", "workflow"] | None = Field(
+        default=None,
+        description="For TEST_BUG only: 'workflow' if an expectation or data is wrong, else 'test'",
+    )
 
 
 class WriteBugReportArgs(BaseModel):
@@ -152,19 +166,106 @@ def _stub(milestone: str) -> Callable[[Any, ToolContext], str]:
     return handler
 
 
+def _workflows_dir(context: ToolContext) -> Path:
+    return context.workdir / "workflows"
+
+
+def _load_workflow(context: ToolContext, workflow_id: str) -> Workflow:
+    path = _workflows_dir(context) / f"{workflow_id}.json"
+    if not path.is_file():
+        raise ToolError(f"no workflow named {workflow_id!r}")
+    try:
+        return Workflow.model_validate_json(path.read_text(encoding="utf-8"))
+    except (ValidationError, UnicodeDecodeError) as exc:
+        raise ToolError(f"{path.name} can't be read: {exc}") from exc
+
+
 def read_spec(args: ReadSpecArgs, context: ToolContext) -> str:
     """Read the API's operations, or one operation's parameters and response schemas."""
-    return _stub("M1")(args, context)
+    graph = context.graph
+    if graph is None:
+        raise ToolError("no spec is loaded")
+    if args.operation_id is None:
+        return json.dumps(
+            {
+                "operations": [
+                    f"{op.operation_id}: {op.method} {op.path}" for op in graph.operations
+                ],
+                "links": [link.model_dump() for link in graph.links],
+            }
+        )
+    operation = graph.operation(args.operation_id)
+    if operation is None:
+        raise ToolError(f"no operation named {args.operation_id!r}")
+    return operation.model_dump_json(by_alias=True, exclude_none=True)
 
 
 def read_docs(args: ReadDocsArgs, context: ToolContext) -> str:
     """List the prose docs, or read one of them."""
-    return _stub("M1")(args, context)
+    root = context.docs_dir
+    if root is None:
+        return "No docs were provided: work from the spec."
+    root = root.resolve()
+    files = sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.suffix.lower() in {".md", ".html", ".htm", ".txt"} and path.is_file()
+    )
+    if args.path is None:
+        return json.dumps(files)
+    if args.path not in files:
+        raise ToolError(f"no doc named {args.path!r}. Docs: {files}")
+    return (root / args.path).read_text(encoding="utf-8", errors="replace")
 
 
 def read_workflows(args: ReadWorkflowsArgs, context: ToolContext) -> str:
     """Read one workflow file, or all of them."""
-    return _stub("M1")(args, context)
+    if args.workflow_id is not None:
+        return _load_workflow(context, args.workflow_id).model_dump_json(exclude_none=True)
+    workflows = []
+    for path in sorted(_workflows_dir(context).glob("*.json")):
+        workflows.append(json.loads(path.read_text(encoding="utf-8")))
+    return json.dumps(workflows)
+
+
+def _check_against_spec(workflow: Workflow, context: ToolContext) -> None:
+    graph = context.graph
+    if graph is None:
+        return
+    for step in [*workflow.steps, *workflow.cleanup]:
+        operation = graph.operation(step.op)
+        if operation is None:
+            raise ToolError(f"operation {step.op!r} isn't in the spec")
+        parameters = {p.name: p for p in operation.parameters}
+        unknown = sorted(set(step.params) - set(parameters))
+        if unknown:
+            raise ToolError(f"{step.op} has no parameters named {unknown}")
+        missing = sorted(
+            p.name
+            for p in parameters.values()
+            if p.location == "path" and p.name not in step.params
+        )
+        if missing:
+            raise ToolError(f"{step.op} needs path parameters {missing}")
+
+
+def _expectation_changes(old: Workflow, new: Workflow) -> list[str]:
+    """List how a rewrite changes what the test checks, so weakening can't happen silently."""
+    changes = []
+    if len(new.steps) < len(old.steps):
+        changes.append(f"steps went from {len(old.steps)} to {len(new.steps)}")
+    for index, (before, after) in enumerate(zip(old.steps, new.steps, strict=False)):
+        if before.expect.status != after.expect.status:
+            changes.append(
+                f"steps[{index}] {before.op}: status {before.expect.status} "
+                f"became {after.expect.status}"
+            )
+        for key in sorted(set(before.expect.body) - set(after.expect.body)):
+            changes.append(f"steps[{index}] {before.op}: stopped checking {key}")
+        for key in sorted(set(before.expect.body) & set(after.expect.body)):
+            if before.expect.body[key] != after.expect.body[key]:
+                changes.append(f"steps[{index}] {before.op}: expected value of {key} changed")
+    return changes
 
 
 def write_workflow(args: WriteWorkflowArgs, context: ToolContext) -> str:
@@ -172,7 +273,9 @@ def write_workflow(args: WriteWorkflowArgs, context: ToolContext) -> str:
     workflow = args.workflow
     if workflow.locked or workflow.source is Source.USER:
         raise ToolError("agents can't create locked or user-sourced workflows")
-    path = context.workdir / "workflows" / f"{workflow.id}.json"
+    _check_against_spec(workflow, context)
+    path = _workflows_dir(context) / f"{workflow.id}.json"
+    changes: list[str] = []
     if path.exists():
         try:
             existing = Workflow.model_validate_json(path.read_text(encoding="utf-8"))
@@ -181,7 +284,13 @@ def write_workflow(args: WriteWorkflowArgs, context: ToolContext) -> str:
             raise ToolError(f"{path.name} exists but can't be read; left unchanged") from exc
         if existing.locked:
             raise ToolError(f"{path.name} is locked by the user and can't be changed")
+        changes = _expectation_changes(existing, workflow)
     atomic_write_text(path, workflow.model_dump_json(indent=2, exclude_none=True) + "\n")
+    if changes:
+        log = context.workdir / ".workflowval" / "expectation_changes.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"workflow_id": workflow.id, "changes": changes}) + "\n")
     return f"wrote workflows/{workflow.id}.json"
 
 
@@ -196,13 +305,29 @@ def answer_review(args: AnswerReviewArgs, context: ToolContext) -> str:
 
 
 def write_test(args: WriteTestArgs, context: ToolContext) -> str:
-    """Write tests/wf/test_<workflow_id>.py as plain pytest + httpx."""
-    return _stub("M1")(args, context)
+    """Replace tests/wf/test_<workflow_id>.py with fixed code. Assertions can't be weakened."""
+    workflow = _load_workflow(context, args.workflow_id)
+    path = context.workdir / test_path(args.workflow_id)
+    previous = path.read_text(encoding="utf-8") if path.is_file() else None
+    try:
+        check_test_source(args.source, workflow, previous)
+        body = args.source
+        if body.startswith("# workflow-sha256: "):
+            body = body.split("\n", 1)[1] if "\n" in body else ""
+        source = format_source(f"{hash_line(workflow)}\n{body}")
+        lint_source(source)
+    except SourceError as exc:
+        raise ToolError(str(exc)) from exc
+    atomic_write_text(path, source)
+    return f"wrote {test_path(args.workflow_id)}"
 
 
 def read_tests(args: ReadTestsArgs, context: ToolContext) -> str:
     """Read the generated test file for a workflow."""
-    return _stub("M1")(args, context)
+    path = context.workdir / test_path(args.workflow_id)
+    if not path.is_file():
+        raise ToolError(f"no test file for {args.workflow_id!r}")
+    return path.read_text(encoding="utf-8")
 
 
 def run_tests(args: RunTestsArgs, context: ToolContext) -> str:
@@ -212,7 +337,15 @@ def run_tests(args: RunTestsArgs, context: ToolContext) -> str:
 
 def read_results(args: ReadResultsArgs, context: ToolContext) -> str:
     """Read test results: status, failing assertion and the last 3 HTTP exchanges."""
-    return _stub("M1")(args, context)
+    path = context.workdir / ".workflowval" / "last_results.json"
+    if not path.is_file():
+        raise ToolError("no tests have run yet")
+    results = json.loads(path.read_text(encoding="utf-8"))
+    if args.test_id is None:
+        return json.dumps(results)
+    if args.test_id not in results:
+        raise ToolError(f"no result for {args.test_id!r}. Results: {sorted(results)}")
+    return json.dumps(results[args.test_id])
 
 
 def http_probe(args: HttpProbeArgs, context: ToolContext) -> str:
@@ -222,7 +355,26 @@ def http_probe(args: HttpProbeArgs, context: ToolContext) -> str:
 
 def write_verdict(args: WriteVerdictArgs, context: ToolContext) -> str:
     """Record the single label for a failed test, with its confidence and reason."""
-    return _stub("M2")(args, context)
+    if args.label is Label.UNRESOLVED:
+        raise ToolError("UNRESOLVED is set by the pipeline when fix attempts run out")
+    confidence = args.confidence
+    _, separator, workflow_id = args.test_id.rpartition("::test_")
+    if (
+        separator
+        and confidence is Confidence.HIGH
+        and _load_workflow(context, workflow_id).basis is Basis.ASSUMED
+    ):
+        confidence = Confidence.MED  # Failures on assumed rules are capped at medium.
+    path = context.workdir / ".workflowval" / "verdicts.json"
+    verdicts = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    verdicts[args.test_id] = {
+        "label": args.label.value,
+        "confidence": confidence.value,
+        "reason": args.reason,
+        "fix_target": (args.fix_target or "workflow") if args.label is Label.TEST_BUG else None,
+    }
+    atomic_write_text(path, json.dumps(verdicts, indent=2) + "\n")
+    return f"recorded {args.label.value} for {args.test_id}"
 
 
 def write_bug_report(args: WriteBugReportArgs, context: ToolContext) -> str:

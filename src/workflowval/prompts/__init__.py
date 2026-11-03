@@ -17,6 +17,14 @@ def load_prompt(name: str) -> str:
     return text[match.end() :].strip()
 
 
+def render_prompt(name: str, **values: str) -> str:
+    """Return a prompt with its <<name>> slots filled. Values are inserted as plain data."""
+    text = load_prompt(name)
+    for key, value in values.items():
+        text = text.replace(f"<<{key}>>", value)
+    return text
+
+
 def prompt_version(name: str) -> int:
     """Return a prompt's version number."""
     text = resources.files(__package__).joinpath(f"{name}.md").read_text(encoding="utf-8")

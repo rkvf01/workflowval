@@ -8,6 +8,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from workflowval.schemas import Workflow
+from workflowval.spec import Operation, Parameter, SpecGraph
 from workflowval.tools import ROLE_TOOLS, TOOLS, ToolContext, ToolError
 
 WORKFLOW = {
@@ -55,11 +56,28 @@ SAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
         {"test_id": "t", "patch": []},
     ),
 }
-STUBS = sorted(set(TOOLS) - {"write_workflow"})
+STUBS = sorted(
+    {"write_review", "answer_review", "run_tests", "http_probe", "write_bug_report"}
+    | {"propose_spec_patch"}
+)
 
 
 def context(tmp_path: Path) -> ToolContext:
     return ToolContext(tmp_path)
+
+
+GRAPH = SpecGraph(
+    operations=[
+        Operation(
+            operation_id="getPet",
+            method="GET",
+            path="/pet/{id}",
+            resource="pet",
+            parameters=[Parameter(name="id", location="path", required=True)],
+        ),
+        Operation(operation_id="listPets", method="GET", path="/pet", resource="pet"),
+    ]
+)
 
 
 def test_every_tool_from_the_doc_exists() -> None:
@@ -228,3 +246,205 @@ def test_a_conflict_report_needs_each_extra_field(field: str, blank: str, tmp_pa
 def test_a_conflict_report_names_every_missing_field(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="docs_excerpt, affected_workflows, suggested"):
         TOOLS["write_bug_report"].invoke({**BUG_REPORT, "kind": "conflict"}, context(tmp_path))
+
+
+def spec_context(tmp_path: Path, **options: Any) -> ToolContext:
+    return ToolContext(tmp_path, GRAPH, **options)
+
+
+def with_step(step: dict[str, Any]) -> dict[str, Any]:
+    return {"workflow": {**WORKFLOW, "steps": [step]}}
+
+
+def listing_step() -> dict[str, Any]:
+    return {"op": "listPets", "expect": {"status": 200}}
+
+
+def test_read_spec_lists_operations_and_reads_one(tmp_path: Path) -> None:
+    tool, ctx = TOOLS["read_spec"], spec_context(tmp_path)
+    assert "listPets: GET /pet" in tool.invoke({}, ctx)
+    assert json.loads(tool.invoke({"operation_id": "getPet"}, ctx))["path"] == "/pet/{id}"
+    with pytest.raises(ToolError, match="no operation"):
+        tool.invoke({"operation_id": "nope"}, ctx)
+
+
+def test_read_spec_needs_a_spec(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match="no spec"):
+        TOOLS["read_spec"].invoke({}, context(tmp_path))
+
+
+def test_read_docs_lists_reads_and_stays_inside_the_folder(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("rule")
+    (docs / "skip.bin").write_text("x")
+    (tmp_path / "secret.md").write_text("private")
+    tool, ctx = TOOLS["read_docs"], spec_context(tmp_path, docs_dir=docs)
+    assert json.loads(tool.invoke({}, ctx)) == ["a.md"]
+    assert tool.invoke({"path": "a.md"}, ctx) == "rule"
+    with pytest.raises(ToolError, match="no doc"):
+        tool.invoke({"path": "../secret.md"}, ctx)
+    assert "No docs" in tool.invoke({}, spec_context(tmp_path))
+
+
+def test_read_workflows_all_and_one(tmp_path: Path) -> None:
+    write(tmp_path)
+    tool, ctx = TOOLS["read_workflows"], context(tmp_path)
+    assert json.loads(tool.invoke({}, ctx))[0]["id"] == "wf"
+    assert json.loads(tool.invoke({"workflow_id": "wf"}, ctx))["id"] == "wf"
+    with pytest.raises(ToolError, match="no workflow"):
+        tool.invoke({"workflow_id": "none"}, ctx)
+
+
+def test_read_workflows_reports_a_broken_file(tmp_path: Path) -> None:
+    (tmp_path / "workflows").mkdir()
+    (tmp_path / "workflows" / "bad.json").write_text("{}")
+    with pytest.raises(ToolError, match="can't be read"):
+        TOOLS["read_workflows"].invoke({"workflow_id": "bad"}, context(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        ({"op": "nope", "expect": {"status": 200}}, "isn't in the spec"),
+        ({"op": "getPet", "expect": {"status": 200}}, "needs path parameters"),
+        ({"op": "listPets", "params": {"x": 1}, "expect": {"status": 200}}, "no parameters named"),
+    ],
+)
+def test_write_workflow_checks_against_the_spec(
+    step: dict[str, Any], message: str, tmp_path: Path
+) -> None:
+    with pytest.raises(ToolError, match=message):
+        TOOLS["write_workflow"].invoke(with_step(step), spec_context(tmp_path))
+
+
+def test_expectation_changes_are_logged_so_weakening_is_visible(tmp_path: Path) -> None:
+    ctx = spec_context(tmp_path)
+    step = {"op": "listPets", "expect": {"status": 200, "body": {"$.a": 1, "$.b": 2}}}
+    TOOLS["write_workflow"].invoke(with_step(step), ctx)
+    log = tmp_path / ".workflowval" / "expectation_changes.jsonl"
+    assert not log.exists()
+    changed = {"op": "listPets", "expect": {"status": 201, "body": {"$.a": 9}}}
+    TOOLS["write_workflow"].invoke(with_step(changed), ctx)
+    entry = json.loads(log.read_text())
+    assert entry["workflow_id"] == "wf"
+    assert any("status 200 became 201" in change for change in entry["changes"])
+    assert any("stopped checking $.b" in change for change in entry["changes"])
+    assert any("expected value of $.a changed" in change for change in entry["changes"])
+
+
+def test_removing_a_step_is_logged(tmp_path: Path) -> None:
+    ctx = spec_context(tmp_path)
+    two = {"workflow": {**WORKFLOW, "steps": [listing_step(), listing_step()]}}
+    TOOLS["write_workflow"].invoke(two, ctx)
+    TOOLS["write_workflow"].invoke(with_step(listing_step()), ctx)
+    log = tmp_path / ".workflowval" / "expectation_changes.jsonl"
+    assert "steps went from 2 to 1" in log.read_text()
+
+
+GOOD_TEST = """\
+def test_wf(api):
+    response = api.call("GET", "/pet")
+    assert response.status_code == 200, response.text
+"""
+
+
+def write_test_file(tmp_path: Path, source: str = GOOD_TEST) -> str:
+    return TOOLS["write_test"].invoke({"workflow_id": "wf", "source": source}, context(tmp_path))
+
+
+def test_write_test_formats_and_ties_the_file_to_its_workflow(tmp_path: Path) -> None:
+    write(tmp_path)
+    assert write_test_file(tmp_path) == "wrote tests/wf/test_wf.py"
+    written = (tmp_path / "tests" / "wf" / "test_wf.py").read_text()
+    assert written.startswith("# workflow-sha256: ")
+    assert TOOLS["read_tests"].invoke({"workflow_id": "wf"}, context(tmp_path)) == written
+    # Sending the file back keeps a single header.
+    write_test_file(tmp_path, written)
+    assert (tmp_path / "tests" / "wf" / "test_wf.py").read_text().count("workflow-sha256") == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("def test_wf(:", "not valid Python"),
+        ("import os\n" + GOOD_TEST, "import of 'os'"),
+        ("from subprocess import run\n" + GOOD_TEST, "import of 'subprocess'"),
+        (GOOD_TEST + "    open('x')\n", "'open' isn't allowed"),
+        (GOOD_TEST + "    eval('1')\n", "'eval' isn't allowed"),
+        ("import pytest\n\n\n" + GOOD_TEST + "    pytest.skip('x')\n", "skip isn't allowed"),
+        ("import pytest\n\n\n@pytest.mark.xfail\n" + GOOD_TEST, "xfail isn't allowed"),
+        (GOOD_TEST.replace("test_wf", "test_other"), "exactly one test"),
+        (GOOD_TEST + "\n\ndef test_two(api):\n    pass\n", "exactly one test"),
+        (GOOD_TEST.replace("200", "201"), "no longer checks status 200"),
+        ("def test_wf(api):\n    x = 200\n", "ruff found"),
+    ],
+)
+def test_write_test_refuses_unsafe_or_weakened_code(
+    source: str, message: str, tmp_path: Path
+) -> None:
+    write(tmp_path)
+    with pytest.raises(ToolError, match=message):
+        write_test_file(tmp_path, source)
+    assert not (tmp_path / "tests" / "wf" / "test_wf.py").exists()
+
+
+def test_write_test_refuses_fewer_assertions(tmp_path: Path) -> None:
+    write(tmp_path)
+    write_test_file(tmp_path, GOOD_TEST + "    assert response.text\n")
+    with pytest.raises(ToolError, match="assertion weakening"):
+        write_test_file(tmp_path)
+
+
+def test_read_tests_without_a_file(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match="no test file"):
+        TOOLS["read_tests"].invoke({"workflow_id": "wf"}, context(tmp_path))
+
+
+def test_read_results(tmp_path: Path) -> None:
+    tool, ctx = TOOLS["read_results"], context(tmp_path)
+    with pytest.raises(ToolError, match="no tests have run"):
+        tool.invoke({}, ctx)
+    path = tmp_path / ".workflowval" / "last_results.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"t": {"status": "failed"}}))
+    assert json.loads(tool.invoke({}, ctx)) == {"t": {"status": "failed"}}
+    assert json.loads(tool.invoke({"test_id": "t"}, ctx)) == {"status": "failed"}
+    with pytest.raises(ToolError, match="no result"):
+        tool.invoke({"test_id": "x"}, ctx)
+
+
+def verdict(tmp_path: Path, **changes: Any) -> dict[str, Any]:
+    arguments = {
+        "test_id": "tests/wf/test_wf.py::test_wf",
+        "label": "API_BUG",
+        "confidence": "high",
+        "reason": "r",
+        **changes,
+    }
+    TOOLS["write_verdict"].invoke(arguments, context(tmp_path))
+    stored = json.loads((tmp_path / ".workflowval" / "verdicts.json").read_text())
+    return stored[arguments["test_id"]]
+
+
+def test_write_verdict_keeps_high_confidence_on_a_documented_rule(tmp_path: Path) -> None:
+    write(tmp_path)
+    assert verdict(tmp_path)["confidence"] == "high"
+
+
+def test_write_verdict_lowers_high_confidence_on_an_assumed_rule(tmp_path: Path) -> None:
+    write(tmp_path, basis="assumed")
+    assert verdict(tmp_path)["confidence"] == "med"
+
+
+def test_write_verdict_defaults_a_test_bug_to_fixing_the_workflow(tmp_path: Path) -> None:
+    write(tmp_path)
+    assert verdict(tmp_path, label="TEST_BUG")["fix_target"] == "workflow"
+    assert verdict(tmp_path, label="TEST_BUG", fix_target="test")["fix_target"] == "test"
+    assert verdict(tmp_path, label="API_BUG", fix_target="test")["fix_target"] is None
+
+
+def test_the_model_cannot_declare_a_test_unresolved(tmp_path: Path) -> None:
+    write(tmp_path)
+    with pytest.raises(ToolError, match="UNRESOLVED"):
+        verdict(tmp_path, label="UNRESOLVED")
