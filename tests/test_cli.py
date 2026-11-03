@@ -63,11 +63,7 @@ def test_version() -> None:
 @pytest.mark.parametrize(
     ("args", "milestone"),
     [
-        (["test", "openapi.json", "--base-url", "http://localhost:8000"], "M1"),
-        (["plan", "openapi.json"], "M1"),
-        (["run", "tests/wf", "--ci"], "M1"),
         (["drift", "spec.json", "--base-url", "https://sandbox.partner.com"], "M2"),
-        (["inspect", "openapi.json"], "M1"),
         (["report", "results.json"], "M2"),
     ],
 )
@@ -75,6 +71,22 @@ def test_stubs_exit_non_zero_and_say_when_they_arrive(args: list[str], milestone
     result = runner.invoke(app, args)
     assert result.exit_code == EXIT_NOT_IMPLEMENTED
     assert f"not implemented yet; it arrives in {milestone}" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "flag"),
+    [
+        (["test", "s.json", "--base-url", "http://localhost", "--read-only"], "--read-only"),
+        (["test", "s.json", "--base-url", "http://localhost", "--ci"], "--ci"),
+        (["test", "s.json", "--base-url", "http://localhost", "--report", "out"], "--report"),
+        (["run", "tests/wf", "--ci"], "--ci"),
+        (["run", "tests/wf", "--read-only"], "--read-only"),
+    ],
+)
+def test_flags_not_built_yet_refuse_instead_of_being_ignored(args: list[str], flag: str) -> None:
+    result = runner.invoke(app, args)
+    assert result.exit_code == EXIT_NOT_IMPLEMENTED
+    assert f"{flag} isn't implemented yet" in result.output
 
 
 @pytest.mark.parametrize("flag", ["--max-iterations", "--max-steps"])

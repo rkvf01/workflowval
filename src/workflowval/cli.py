@@ -1,18 +1,28 @@
-"""The workflowval command line. In M0 every command validates its flags, then says it's a stub."""
+"""The workflowval command line. Flags that aren't built yet refuse to run, never silently no-op."""
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 
 from workflowval import __version__
+from workflowval.loop import Budget, StopReason
+from workflowval.models import LiteLLMModel, Model
+from workflowval.pipeline import TestConfig, TestRunReport, auth_env_names, run_test_pipeline
+from workflowval.schemas import AuthConfig, load_json
+from workflowval.spec import SpecError, build_graph, load_spec
+from workflowval.testrun import run_tests
 from workflowval.tools import ROLE_TOOLS
 
 EXIT_NOT_IMPLEMENTED = 3
+EXIT_FAILURES = 1
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 HELP = """Infer multi-step API workflows from an OpenAPI spec, test them and triage every failure.
 
@@ -31,6 +41,7 @@ Flags (see each command's --help for the ones it takes):
   --ci                        Non-interactive; exit non-zero on failing results
   --plan-only                 Stop after writing the workflow files
   --verbose                   Echo the trace to the console
+  --no-cost-tracking          Don't report cost; or set WORKFLOWVAL_COST_TRACKING=off
 """
 
 app = typer.Typer(help=HELP, no_args_is_help=True, rich_markup_mode=None, add_completion=False)
@@ -83,6 +94,12 @@ Verbose = Annotated[bool, typer.Option("--verbose", help="Echo the trace to the 
 Seed = Annotated[int | None, typer.Option("--seed", help="Model seed, where supported.")]
 Temperature = Annotated[
     float | None, typer.Option("--temperature", min=0.0, help="Model temperature.")
+]
+NoCost = Annotated[
+    bool,
+    typer.Option(
+        "--no-cost-tracking", help="Don't report cost; or set WORKFLOWVAL_COST_TRACKING=off."
+    ),
 ]
 
 
@@ -138,6 +155,91 @@ def _stub(command: str, milestone: str) -> None:
     raise typer.Exit(EXIT_NOT_IMPLEMENTED)
 
 
+def _refuse_unbuilt(**flags: bool | Path | None) -> None:
+    """Refuse a flag that isn't built yet, rather than ignore a safety or reporting promise."""
+    milestones = {"read_only": "M3", "ci": "M3", "report": "M2"}
+    for name, value in flags.items():
+        if value:
+            flag = "--" + name.replace("_", "-")
+            typer.echo(f"{flag} isn't implemented yet; it arrives in {milestones[name]}.", err=True)
+            raise typer.Exit(EXIT_NOT_IMPLEMENTED)
+
+
+def check_host(
+    base_url: str, allow_hosts: list[str] | None, *, allow_remote: bool, yes: bool
+) -> None:
+    """Enforce NFR-1 and NFR-2: only allowed hosts, and nothing remote without explicit consent."""
+    host = urlparse(base_url).hostname
+    if host is None:
+        raise typer.BadParameter(f"--base-url must be a full URL, got {base_url!r}")
+    if allow_hosts and host not in allow_hosts:
+        raise typer.BadParameter(f"{host} isn't in --allow-host")
+    if host not in LOCAL_HOSTS:
+        if not allow_remote:
+            raise typer.BadParameter(f"{host} isn't local: pass --allow-remote to call it")
+        if not yes:
+            raise typer.BadParameter(f"tests write to {host}: pass --yes to confirm")
+
+
+def _load_auth(path: Path | None) -> AuthConfig | None:
+    if path is None:
+        return None
+    try:
+        return load_json(AuthConfig, path)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"can't read auth config {path}: {exc}") from exc
+
+
+def _check_auth_env(auth: AuthConfig | None) -> None:
+    missing = [name for name in auth_env_names(auth) if not os.environ.get(name)]
+    if missing:
+        raise typer.BadParameter(f"auth config needs env vars that aren't set: {missing}")
+
+
+def _build_models(
+    choice: ModelChoice, seed: int | None, temperature: float | None, cost_tracked: bool
+) -> dict[str, Model]:
+    models: dict[str, Model] = {}
+    for role in ROLE_TOOLS:
+        name = choice.for_role(role)
+        if name is None:
+            raise typer.BadParameter(
+                f"no model for {role}: pass --model provider/name or set WORKFLOWVAL_MODEL"
+            )
+        models[role] = LiteLLMModel(
+            name, temperature=temperature, seed=seed, track_cost=cost_tracked
+        )
+    return models
+
+
+def _cost_tracked(no_cost_tracking: bool) -> bool:
+    return not no_cost_tracking and os.environ.get("WORKFLOWVAL_COST_TRACKING", "") != "off"
+
+
+def _print_report(report: TestRunReport) -> None:
+    for test in report.results.tests:
+        verdict = test.verdict
+        if verdict is None:
+            typer.echo(f"PASSED      {test.workflow_id}")
+        else:
+            typer.echo(f"{verdict.label.value:<11} {test.workflow_id}: {verdict.reason}")
+    for change in report.expectation_changes:
+        typer.echo(f"CHANGED     {change}")
+    if report.results.uncovered_operations:
+        operations = ", ".join(report.results.uncovered_operations)
+        typer.echo(f"NOT COVERED {operations}")
+    typer.echo(report.run.summary)
+    typer.echo(f"results: {report.results_path}")
+
+
+def _run_pipeline(config: TestConfig) -> TestRunReport:
+    try:
+        return run_test_pipeline(config)
+    except SpecError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
 def _version(value: bool) -> None:
     if value:
         typer.echo(f"workflowval {__version__}")
@@ -178,10 +280,38 @@ def test_command(
     verbose: Verbose = False,
     seed: Seed = None,
     temperature: Temperature = None,
+    no_cost_tracking: NoCost = False,
 ) -> None:
     """Plan workflows, write tests, run them against the API and triage every failure."""
-    resolve_models(model, role_model)
-    _stub("test", "M1")
+    _refuse_unbuilt(read_only=read_only, ci=ci, report=report)
+    choice = resolve_models(model, role_model)
+    check_host(base_url, allow_host, allow_remote=allow_remote, yes=yes)
+    auth_config = _load_auth(auth)
+    _check_auth_env(auth_config)
+    tracked = _cost_tracked(no_cost_tracking)
+    outcome = _run_pipeline(
+        TestConfig(
+            spec_source=spec,
+            base_url=base_url,
+            workdir=Path.cwd(),
+            models=_build_models(choice, seed, temperature, tracked),
+            budget=Budget(
+                max_review_rounds=max_review_rounds,
+                max_fix_attempts=max_fix_attempts,
+                max_iterations=max_iterations,
+                max_steps=max_steps,
+            ),
+            docs_dir=docs,
+            auth=auth_config,
+            plan_only=plan_only,
+            verbose=verbose,
+            cost_tracked=tracked,
+        )
+    )
+    _print_report(outcome)
+    clean = outcome.run.stop_reason is StopReason.COMPLETED
+    if not clean or any(test.verdict is not None for test in outcome.results.tests):
+        raise typer.Exit(EXIT_FAILURES)
 
 
 @app.command("plan")
@@ -195,10 +325,29 @@ def plan_command(
     verbose: Verbose = False,
     seed: Seed = None,
     temperature: Temperature = None,
+    no_cost_tracking: NoCost = False,
 ) -> None:
     """Write reviewable workflows/<id>.json files and stop."""
-    resolve_models(model, role_model)
-    _stub("plan", "M1")
+    choice = resolve_models(model, role_model)
+    tracked = _cost_tracked(no_cost_tracking)
+    outcome = _run_pipeline(
+        TestConfig(
+            spec_source=spec,
+            base_url="http://localhost",
+            workdir=Path.cwd(),
+            models=_build_models(choice, seed, temperature, tracked),
+            budget=Budget(max_review_rounds=max_review_rounds, max_steps=max_steps),
+            docs_dir=docs,
+            plan_only=True,
+            verbose=verbose,
+            cost_tracked=tracked,
+        )
+    )
+    typer.echo(outcome.run.summary)
+    if not outcome.planned:
+        typer.echo("The spec hasn't changed, so the existing workflow files were kept.")
+    if outcome.run.stop_reason is not StopReason.COMPLETED:
+        raise typer.Exit(EXIT_FAILURES)
 
 
 @app.command("run")
@@ -217,7 +366,22 @@ def run_command(
     verbose: Verbose = False,
 ) -> None:
     """Re-run existing tests without calling a model."""
-    _stub("run", "M1")
+    _refuse_unbuilt(read_only=read_only, ci=ci, report=report)
+    if not tests.is_dir():
+        raise typer.BadParameter(f"no such folder: {tests}")
+    if base_url:
+        check_host(base_url, allow_host, allow_remote=allow_remote, yes=yes)
+    auth_config = _load_auth(auth)
+    _check_auth_env(auth_config)
+    outcomes = run_tests(tests, base_url=base_url, env_names=auth_env_names(auth_config))
+    if not outcomes:
+        typer.echo(f"No tests found in {tests}", err=True)
+        raise typer.Exit(EXIT_FAILURES)
+    for outcome in outcomes:
+        detail = "" if outcome.passed else f": {outcome.failing_assertion}"
+        typer.echo(f"{outcome.status.upper():<11} {outcome.workflow_id}{detail}")
+    if not all(outcome.passed for outcome in outcomes):
+        raise typer.Exit(EXIT_FAILURES)
 
 
 @app.command("drift")
@@ -247,7 +411,12 @@ def drift_command(
 @app.command("inspect")
 def inspect_command(spec: Spec) -> None:
     """Export the spec's resources, operations and producer-to-consumer links as JSON."""
-    _stub("inspect", "M1")
+    try:
+        graph = build_graph(load_spec(spec))
+    except SpecError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(json.dumps(graph.model_dump(by_alias=True), indent=2))
 
 
 @app.command("report")
