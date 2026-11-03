@@ -6,7 +6,7 @@ The requirements ask you to review the data formats before M1 starts. They live 
 | File | Model | Module |
 | --- | --- | --- |
 | `workflows/<id>.json` | `Workflow` | `workflow.py` |
-| `review.json` | `Review` | `review.py` |
+| `review.json` | `ReviewLog` | `review.py` |
 | `results.json` | `RunResults` | `results.py` |
 | `benchmarks/seeded/labels.json` | `Labels` | `labels.py` |
 | auth config | `AuthConfig` | `auth.py` |
@@ -26,7 +26,7 @@ M0 uses the choice in each row. Rows marked "open" still need your decision.
 | 5 | A CONFLICT report has extra fields compared with an API_BUG report | One `write_bug_report` tool with a `kind` field | Decided: keep; a conflict must include its extra fields |
 | 6 | The workflow example can't send a request body | Optional `body` on steps and cleanup | Decided: keep |
 | 7 | Workflows can't call a route unauthenticated, which the seeded "missing auth check" bug needs | `auth` on steps, default true | Decided: keep |
-| 8 | The Planner must answer `review.json`, but no tool in its list reads it | No new tool: the loop passes the review in the Planner's instruction, built in M3 | Decided: loop passes it in |
+| 8 | The Planner must answer `review.json`, but no tool in its list reads it | No new tool: the loop passes the review in the Planner's instruction | Decided and built |
 
 ## Learning the step limit from stats
 
@@ -72,5 +72,6 @@ The limit only changes if you change it.
 - **Stopping (built in M1):** a failing test never stops the run. A major problem, such as the API being
   unreachable, stops it with a clear reason, so failures aren't mislabeled as bugs.
 
-**Review closed 2026-11-02.** M1 and M2 have since been built, with some format changes: M2 added
-`known_issue` to workflows and `findings` to results. See `docs/m1-notes.md` and `docs/m2-notes.md`.
+**Review closed 2026-11-02.** M1, M2 and M3 have since been built, with some format changes: M2 added
+`known_issue` to workflows and `findings` to results, and M3 made `review.json` a list of rounds. See
+`docs/m1-notes.md`, `docs/m2-notes.md` and `docs/m3-notes.md`.

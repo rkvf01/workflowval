@@ -1,6 +1,6 @@
 # M1 notes
 
-M2 changed some of this: see `docs/m2-notes.md`.
+M2 and M3 changed some of this: see `docs/m2-notes.md` and `docs/m3-notes.md`.
 
 ## Decisions that change the requirements
 
@@ -66,12 +66,8 @@ with no key.
 - **`write_test` checks are not a sandbox.** They restrict imports and calls in model-edited tests, but
   generated tests still run on your machine with your user's permissions. Only run this against
   specs and docs you trust.
-- **`--allow-host`** only checks the base URL. Full enforcement on every request arrives in M3.
-- **Not built, and refused rather than ignored:** `--read-only` and `--ci` (M3). This means
-  `--ci-max-api-bugs` and `--ci-max-spec-drift` have no effect yet.
 - **`run` only passes on the env vars named by `--auth`.** Without `--auth`, tests that log in fail with
   `environment variable ... is not set`, even if it is set in your shell. Plain `pytest` inherits your
   whole environment, so it doesn't need this.
 - **`run` doesn't label new failures,** since labeling takes a model.
-- **`--max-review-rounds`** is accepted but has no effect until plan review arrives in M3.
 - **Results vary by model and run**, since the Planner chooses the workflows.

@@ -3,9 +3,9 @@
 Model-agnostic CLI agent that reads an OpenAPI spec, infers multi-step workflows, writes and runs
 pytest tests against a live API, and triages every failure as a test bug, an API bug or spec drift.
 
-**Status: M2.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`. `--ci`
-and `--read-only` arrive in M3. Requirements are in `workflowreq.md`, decisions in `docs/m0-review.md`,
-and changes and known limits in `docs/m1-notes.md` and `docs/m2-notes.md`.
+**Status: M3.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`. Requirements
+are in `workflowreq.md`, decisions in `docs/m0-review.md`, and changes and known limits in `docs/m1-notes.md`,
+`docs/m2-notes.md` and `docs/m3-notes.md`.
 
 ## Quickstart
 
@@ -49,21 +49,32 @@ reachable API and, for a login API, its credentials.
 
 ## Benchmark
 
-Scored against a seeded-bug app with 10 planted defects and one spec-docs conflict. The results are from 3
-rounds on one low-cost model, and they miss most of the v1 targets, partly because richer workflows arrive
-in M3. See `docs/m2-notes.md` for what the numbers mean, and `benchmarks/seeded/README.md` for who wrote the
-app, which affects how independent this score is.
+Scored against a seeded-bug app with 10 planted defects and one spec-docs conflict, for 3 rounds on one low-cost
+model. See `docs/m3-notes.md` for what the numbers mean, and `benchmarks/seeded/README.md` for who wrote the app,
+which affects how independent this score is.
 
 | Metric | Median (range) | Target |
 | --- | --- | --- |
-| Seeded bugs detected, of 10 | 4 (4 to 5) | 8 or more |
-| Label accuracy on detected bugs, % | 80 (75 to 100) | 80 or more |
-| False API_BUG on the clean build | 0 (0 to 0) | 1 or fewer |
-| Tests green on the clean build, % | 100 (100 to 100) | 90 or more |
-| Bugs with a workflow that could catch them, of 10 | 6 (5 to 6) | 10 |
+| Seeded bugs detected, of 10 | 9 (8 to 10) | 8 or more |
+| Label accuracy on detected bugs, % | 75 (56 to 80) | 80 or more |
+| Bugs a workflow could catch, of 10 | 10 (9 to 10) | 10 |
+| False API_BUG on the clean build | 1 (0 to 1) | 1 or fewer |
+| Tests green on the clean build, % | 97 (96 to 100) | 90 or more |
 | CONFLICT reports | 0 (0 to 0) | 1 |
-| API_BUG on the conflict rule | 0 (0 to 0) | 0 |
-| Cost per round, USD | 0.0684 (0.0567 to 0.072) | reported only |
+| Cost per round, USD | 0.30 (0.28 to 0.33) | reported only |
+
+Label accuracy and the conflict report still miss their targets.
+
+## Safety and CI
+
+```
+workflowval test openapi.json --base-url https://staging.example.com --allow-remote --read-only
+workflowval run tests/wf --ci --ci-max-api-bugs 2
+```
+
+`--read-only` sends no writes. A non-local host needs `--allow-remote`, then `--yes`, `--ci` or `--read-only`.
+Generated tests refuse any other host. `--ci` fails on anything unresolved, or on bugs above the limits. A killed
+`workflowval test` picks up at its last step when run again. See `docs/m3-notes.md`.
 
 ## Develop
 

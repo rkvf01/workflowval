@@ -32,10 +32,11 @@ workflowval run tests/wf --auth examples/restful-booker/auth.json
 ## Seeded-bug app
 
 ```
-WORKFLOWVAL_MODEL=provider/name uv run python benchmarks/run_benchmark.py --rounds 3 --limit 2
+WORKFLOWVAL_MODEL=provider/name uv run python benchmarks/run_benchmark.py --rounds 3 --limit 2 --review-rounds 2
 ```
 
 This starts the app itself, runs both builds and prints a table. It keeps total spending in
 `.benchmark/spend.jsonl`, across calls and models, and won't start a run that could pass `--limit`.
-Each model's runs and scores are kept in their own folder under `.benchmark/`. See
+Each setup's runs and scores are kept in their own folder under `.benchmark/m3/`, and `--review-rounds 0` turns
+the plan review off to compare the two. See
 `benchmarks/seeded/README.md`.
