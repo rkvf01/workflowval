@@ -30,9 +30,9 @@ M0 uses the choice in each row. Rows marked "open" still need your decision.
 
 ## Learning the step limit from stats
 
-Every run writes `.workflowval/stats.json`: model calls and tool calls per workflow, with tool names
-and counts only. Work that belongs to no single workflow goes under `run`. Each finished run also adds
-a line to `.workflowval/stats_history.jsonl`.
+Every run writes `.workflowval/stats.json`: model calls, tool calls and cost, per workflow and per role.
+It holds tool names and counts only, never arguments. Work that belongs to no single workflow goes under
+`run`. Each finished run also adds a line to `.workflowval/stats_history.jsonl`.
 
 After at least 5 usable runs, a run reports a suggested `--max-steps`, about 1.5 times the largest of
 the last 20 runs. If a recent run hit the current limit, it suggests 1.5 times that limit instead.
@@ -52,23 +52,24 @@ The limit only changes if you change it.
   (M1) and the Reviewer's missing-journey check (M3).
 - The agents create rules as they write workflows, with or without docs, and there is no separate
   rule list. Failure cases are rules too (for example, "An order with quantity 0 is rejected with
-  422"). The M1 Planner prompt must say both.
+  422"). The Planner prompt says both.
 - A test still open when a budget stops the run is marked UNRESOLVED, so `--ci` fails on it.
 - A rule stated explicitly in the spec has `basis: "documented"`. A rule an agent inferred has
-  `basis: "assumed"`. A failure on an assumed rule is lowered to medium confidence by the loop in M2,
+  `basis: "assumed"`. A failure on an assumed rule is lowered to medium confidence by `write_verdict`,
   and `results.json` rejects high as a backstop.
 - Unknown fields are rejected in the workflow file's own structure. `body` and `params` are sent as
   written, so a test can deliberately send bad values or unknown fields.
 - For login auth, the agent decides how to send the token, from the spec's security section, then
   the docs, then the login response and what the API accepts. `token_header` and `token_prefix` are
-  optional overrides. The agent never sees secret values.
+  optional overrides. The agent never sees secret values. M1 builds only part of this: see "Login
+  token style" in `docs/m1-notes.md`.
 
 ## Decisions for later milestones
 
-- **CI (M2, M3):** failures on `assumed` rules count toward `--ci-max-api-bugs` and
+- **CI (M3):** failures on `assumed` rules will count toward `--ci-max-api-bugs` and
   `--ci-max-spec-drift` the same as any other. With the default of 0, one wrong guess fails the build.
   Raise the thresholds if that proves too noisy.
-- **Stopping (M1):** a failing test never stops the run. A major problem, such as the API being
+- **Stopping (built in M1):** a failing test never stops the run. A major problem, such as the API being
   unreachable, stops it with a clear reason, so failures aren't mislabeled as bugs.
 
-**Review closed 2026-11-02.** Starting M1 needs your go-ahead.
+**Review closed 2026-11-02.** M1 has since been built; see `docs/m1-notes.md` for what changed.
