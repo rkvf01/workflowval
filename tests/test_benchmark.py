@@ -261,3 +261,16 @@ def test_the_failing_traffic_with_the_words_is_a_detection() -> None:
     retry = {**failing("r", "API_BUG", "a retry made a duplicate"), "exchanges": [created, created]}
     other = workflow("r", step("createOrder"))
     assert bug(bench.score_buggy(results(retry), [other], LABELS), "idempotency_ignored")["correct"]
+
+
+def test_a_test_that_never_reached_the_refund_is_not_a_detection() -> None:
+    flow = workflow("r", step("createOrder"), step("refundOrder"))
+    early = failing("r", "SPEC_DRIFT", "the refund flow broke on a renamed field", http=201)
+    assert not bug(
+        bench.score_buggy(results(early), [flow], LABELS), "refund_after_partial_cancel"
+    )["detected"]
+    refunded = {"method": "POST", "url": "http://h/orders/1/refund", "status": 200}
+    reached = {**early, "exchanges": [refunded]}
+    assert bug(bench.score_buggy(results(reached), [flow], LABELS), "refund_after_partial_cancel")[
+        "detected"
+    ]

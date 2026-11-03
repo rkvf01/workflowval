@@ -3,10 +3,9 @@
 Model-agnostic CLI agent that reads an OpenAPI spec, infers multi-step workflows, writes and runs
 pytest tests against a live API, and triages every failure as a test bug, an API bug or spec drift.
 
-**Status: M1.** `test`, `plan`, `run` and `inspect` work against a live API. Bug reports, spec
-patches, reports and `drift` arrive in M2, and `--ci` and `--read-only` in M3. Requirements are in
-`workflowreq.md`, decisions in `docs/m0-review.md`, and changes, demo results and known limits in
-`docs/m1-notes.md`.
+**Status: M2.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`. `--ci`
+and `--read-only` arrive in M3. Requirements are in `workflowreq.md`, decisions in `docs/m0-review.md`,
+and changes and known limits in `docs/m1-notes.md` and `docs/m2-notes.md`.
 
 ## Quickstart
 
@@ -18,7 +17,8 @@ workflowval test openapi.json --base-url http://localhost:8000
 workflowval run tests/wf
 ```
 
-This writes `workflows/<id>.json`, `tests/wf/test_<id>.py` and `results.json` in the current folder.
+This writes `workflows/<id>.json`, `tests/wf/test_<id>.py` and `results.json` in the current folder,
+plus `report.md`, `junit.xml`, bug reports and spec patches in `reports/`.
 If the API needs a login, pass `--auth auth.json` to both `test` and `run`, and set the env vars that
 file names. See `benchmarks/targets.md` for the demo targets.
 
@@ -28,12 +28,42 @@ file names. See `benchmarks/targets.md` for the demo targets.
 | --- | --- |
 | `workflowval inspect` | `workflowval plan` |
 | `workflowval run tests/wf` | `workflowval test` |
-| Plain `pytest tests/wf` | Labeling and fixing failures |
-| This repo's own lint and tests | `uv run pytest -m live` |
+| Plain `pytest tests/wf` | `workflowval drift` |
+| `workflowval report` | Labeling and fixing failures |
+| This repo's own lint and tests | `uv run pytest -m live`, and the benchmark |
 
-So you can generate tests once, commit them, and re-run them with no model cost. A failing test makes
-`run` exit 1, but nothing labels the failure; run `workflowval test` to get the diagnosis. `run` and
-`pytest` still need a reachable API and, for a login API, its credentials.
+So you can generate tests once, commit them, and re-run them with no model cost. A failure already
+reviewed as real counts as expected, so it doesn't fail the run. Any other failure makes `run` exit 1,
+but nothing labels it; run `workflowval test` to get the diagnosis. `run` and `pytest` still need a
+reachable API and, for a login API, its credentials.
+
+## Reading the results
+
+| Result | Meaning | Fails the run? |
+| --- | --- | --- |
+| `PASSED` | The test passed | No |
+| `EXPECTED` | It hit the failure already reviewed as real, and only that failure | No |
+| `LOOKS FIXED` | A test marked as a known issue passed | No |
+| `MISMATCH` | A response breaks the spec, though the test may pass | No, except in `drift` |
+| `UNRESOLVED` | Fix attempts ran out, or the failure has no verdict | Yes |
+
+## Benchmark
+
+Scored against a seeded-bug app with 10 planted defects and one spec-docs conflict. The results are from 3
+rounds on one low-cost model, and they miss most of the v1 targets, partly because richer workflows arrive
+in M3. See `docs/m2-notes.md` for what the numbers mean, and `benchmarks/seeded/README.md` for who wrote the
+app, which affects how independent this score is.
+
+| Metric | Median (range) | Target |
+| --- | --- | --- |
+| Seeded bugs detected, of 10 | 4 (4 to 5) | 8 or more |
+| Label accuracy on detected bugs, % | 80 (75 to 100) | 80 or more |
+| False API_BUG on the clean build | 0 (0 to 0) | 1 or fewer |
+| Tests green on the clean build, % | 100 (100 to 100) | 90 or more |
+| Bugs with a workflow that could catch them, of 10 | 6 (5 to 6) | 10 |
+| CONFLICT reports | 0 (0 to 0) | 1 |
+| API_BUG on the conflict rule | 0 (0 to 0) | 0 |
+| Cost per round, USD | 0.0684 (0.0567 to 0.072) | reported only |
 
 ## Develop
 
@@ -41,7 +71,7 @@ So you can generate tests once, commit them, and re-run them with no model cost.
 uv sync
 uv run ruff check . && uv run ruff format --check .
 uv run mypy --strict src
-uv run pytest --cov=workflowval.loop --cov=workflowval.spec --cov-fail-under=80
+uv run pytest --cov=workflowval.loop --cov=workflowval.spec --cov=workflowval.triage --cov-fail-under=80
 uv run workflowval --help
 ```
 

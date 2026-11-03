@@ -72,4 +72,5 @@ The limit only changes if you change it.
 - **Stopping (built in M1):** a failing test never stops the run. A major problem, such as the API being
   unreachable, stops it with a clear reason, so failures aren't mislabeled as bugs.
 
-**Review closed 2026-11-02.** M1 has since been built; see `docs/m1-notes.md` for what changed.
+**Review closed 2026-11-02.** M1 and M2 have since been built, with some format changes: M2 added
+`known_issue` to workflows and `findings` to results. See `docs/m1-notes.md` and `docs/m2-notes.md`.

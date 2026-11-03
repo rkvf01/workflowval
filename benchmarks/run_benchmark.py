@@ -71,6 +71,12 @@ TRAFFIC: dict[str, Callable[[list[dict[str, Any]]], bool]] = {
     "pagination_off_by_one": lambda e: bool(e) and "page=" in str(e[-1].get("url", "")),
     "idempotency_ignored": lambda e: _creates(e) >= 2,
     "empty_filter_500": lambda e: (_last_status(e) or 0) >= 500,
+    "refund_after_partial_cancel": lambda e: any(
+        str(item.get("url", "")).endswith("/refund") for item in e
+    ),
+    "cancel_after_shipped": lambda e: any(
+        str(item.get("url", "")).endswith("/cancel") for item in e
+    ),
 }
 
 
@@ -385,15 +391,38 @@ def render_table(buggy: list[dict[str, Any]], clean: list[dict[str, Any]]) -> st
     return "\n".join(lines) + "\n"
 
 
+def rescore(labels: dict[str, Any]) -> int:
+    """Score the saved runs again, with no model and no cost."""
+    folder = LEDGER.parent
+    buggy, clean = [], []
+    for path in sorted(folder.glob("round-*-buggy")):
+        workflows = [json.loads(item.read_text()) for item in sorted(path.glob("workflows/*.json"))]
+        buggy.append(
+            score_buggy(json.loads((path / "results.json").read_text()), workflows, labels)
+        )
+    for path in sorted(folder.glob("round-*-clean")):
+        clean.append(score_clean(json.loads((path / "results.json").read_text())))
+    table = render_table(buggy, clean)
+    (folder / "summary.md").write_text(table, encoding="utf-8")
+    (folder / "scores.json").write_text(
+        json.dumps({"buggy": buggy, "clean": clean}, indent=2), encoding="utf-8"
+    )
+    print(table)
+    return 0
+
+
 def main() -> int:
     """Run the rounds, stopping before the spending limit."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--limit", type=float, default=2.0, help="Total USD across all calls")
+    parser.add_argument("--rescore", action="store_true", help="Score saved runs, at no cost")
     args = parser.parse_args()
+    labels = json.loads((SEEDED / "labels.json").read_text())
+    if args.rescore:
+        return rescore(labels)
     if not os.environ.get("WORKFLOWVAL_MODEL"):
         parser.error("set WORKFLOWVAL_MODEL")
-    labels = json.loads((SEEDED / "labels.json").read_text())
     buggy_scores: list[dict[str, Any]] = []
     clean_scores: list[dict[str, Any]] = []
     for number in range(1, args.rounds + 1):
