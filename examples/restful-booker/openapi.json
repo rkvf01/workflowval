@@ -3,7 +3,7 @@
   "info": {
     "title": "Restful-booker",
     "version": "1.0.0",
-    "description": "Written from the published API docs at https://restful-booker.herokuapp.com/apidoc/index.html"
+    "description": "Hand-written from the API doc comments in routes/index.js of github.com/mwinteringham/restful-booker. A subset: documented error cases are not all listed."
   },
   "paths": {
     "/ping": {
