@@ -318,5 +318,6 @@ def test_each_model_keeps_its_runs_apart_inside_the_ignored_folder() -> None:
     first = bench.runs_folder("vendor/model-a", 2)
     assert first != bench.runs_folder("vendor/model-b", 2)
     assert first != bench.runs_folder("vendor/model-a", 0), "review on and off stay apart"
+    assert first != bench.runs_folder("vendor/model-a", 2, "vendor/model-b"), "reviewers stay apart"
     assert bench.LEDGER.parent in first.parents
     assert "/" not in first.name

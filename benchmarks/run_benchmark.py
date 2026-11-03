@@ -317,14 +317,21 @@ def _wait_until_up(url: str) -> None:
     raise RuntimeError(f"the seeded app didn't start at {url}")
 
 
-def runs_folder(model: str, review_rounds: int) -> Path:
+def runs_folder(model: str, review_rounds: int, reviewer_model: str | None = None) -> Path:
     """Where one setup's runs are kept, so comparing setups overwrites nothing."""
     name = re.sub(r"[^a-z0-9.-]+", "-", model.lower())
-    return LEDGER.parent / "m3" / f"{name}-review-{review_rounds}"
+    folder = f"{name}-review-{review_rounds}"
+    if reviewer_model:
+        folder += "-reviewer-" + re.sub(r"[^a-z0-9.-]+", "-", reviewer_model.lower())
+    return LEDGER.parent / "m3" / folder
 
 
 def run_once(
-    build: str, round_number: int, folder: Path, review_rounds: int
+    build: str,
+    round_number: int,
+    folder: Path,
+    review_rounds: int,
+    reviewer_model: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Run workflowval on one build, from a folder that can't see the labels or the app."""
     env = {**os.environ, "ORDERS_TOKEN": TOKEN, "SEEDED_BUILD": build}
@@ -364,6 +371,7 @@ def run_once(
                     str(MAX_STEPS),
                     "--max-review-rounds",
                     str(review_rounds),
+                    *(["--role-model", f"reviewer={reviewer_model}"] if reviewer_model else []),
                 ],
                 cwd=temporary,
                 env={k: v for k, v in env.items() if k != "SEEDED_BUILD"},
@@ -443,23 +451,29 @@ def main() -> int:
     parser.add_argument(
         "--review-rounds", type=int, default=2, help="0 turns the Reviewer's plan review off"
     )
+    parser.add_argument("--reviewer-model", help="A different model for the Reviewer alone")
+    parser.add_argument(
+        "--buggy-only", action="store_true", help="Skip the clean build, for a quick label check"
+    )
     parser.add_argument("--rescore", action="store_true", help="Score saved runs, at no cost")
     args = parser.parse_args()
     labels = json.loads((SEEDED / "labels.json").read_text())
     model = os.environ.get("WORKFLOWVAL_MODEL")
     if not model:
         parser.error("set WORKFLOWVAL_MODEL")
-    folder = runs_folder(model, args.review_rounds)
+    folder = runs_folder(model, args.review_rounds, args.reviewer_model)
     if args.rescore:
         return rescore(folder, labels)
     buggy_scores: list[dict[str, Any]] = []
     clean_scores: list[dict[str, Any]] = []
     for number in range(1, args.rounds + 1):
-        for build in ("buggy", "clean"):
+        for build in ("buggy",) if args.buggy_only else ("buggy", "clean"):
             if not next_run_is_allowed(spent(), args.limit, setup_costs(folder)):
                 print(f"Stopping: another run could pass ${args.limit}. Spent ${sum(spent()):.4f}.")
                 return 3
-            results, workflows = run_once(build, number, folder, args.review_rounds)
+            results, workflows = run_once(
+                build, number, folder, args.review_rounds, args.reviewer_model
+            )
             if results.get("unpriced_calls"):
                 print("Stopping: a run had calls with no known price, so spend isn't reliable.")
                 return 3
@@ -469,6 +483,9 @@ def main() -> int:
             else:
                 clean_scores.append(score_clean(results))
                 print(json.dumps(clean_scores[-1]))
+    if args.buggy_only:
+        print(f"Total spent, across all calls: ${sum(spent()):.4f}")
+        return 0
     table = render_table(buggy_scores, clean_scores)
     (folder / "summary.md").write_text(table, encoding="utf-8")
     (folder / "scores.json").write_text(
