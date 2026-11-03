@@ -55,13 +55,13 @@ which affects how independent this score is.
 
 | Metric | Median (range) | Target |
 | --- | --- | --- |
-| Seeded bugs detected, of 10 | 9 (8 to 10) | 8 or more |
-| Label accuracy on detected bugs, % | 75 (56 to 80) | 80 or more |
-| Bugs a workflow could catch, of 10 | 10 (9 to 10) | 10 |
-| False API_BUG on the clean build | 1 (0 to 1) | 1 or fewer |
-| Tests green on the clean build, % | 97 (96 to 100) | 90 or more |
+| Seeded bugs detected, of 10 | 10 (9 to 10) | 8 or more |
+| Label accuracy on detected bugs, % | 70 (67 to 90) | 80 or more |
+| Bugs a workflow could catch, of 10 | 10 (10 to 10) | 10 |
+| False API_BUG on the clean build | 1 (1 to 1) | 1 or fewer |
+| Tests green on the clean build, % | 98 (96 to 98) | 90 or more |
 | CONFLICT reports | 0 (0 to 0) | 1 |
-| Cost per round, USD | 0.30 (0.28 to 0.33) | reported only |
+| Cost per round, USD | 0.31 (0.30 to 0.35) | reported only |
 
 Label accuracy and the conflict report still miss their targets.
 
