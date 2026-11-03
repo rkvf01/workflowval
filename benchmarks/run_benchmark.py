@@ -302,7 +302,14 @@ def _wait_until_up(url: str) -> None:
     raise RuntimeError(f"the seeded app didn't start at {url}")
 
 
-def run_once(build: str, round_number: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def runs_folder(model: str) -> Path:
+    """Where one model's runs are kept, so comparing models overwrites nothing."""
+    return LEDGER.parent / re.sub(r"[^a-z0-9.-]+", "-", model.lower())
+
+
+def run_once(
+    build: str, round_number: int, folder: Path
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Run workflowval on one build, from a folder that can't see the labels or the app."""
     env = {**os.environ, "ORDERS_TOKEN": TOKEN, "SEEDED_BUILD": build}
     url = f"http://127.0.0.1:{PORT}"
@@ -325,7 +332,7 @@ def run_once(build: str, round_number: int) -> tuple[dict[str, Any], list[dict[s
     )
     try:
         _wait_until_up(url)
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory() as temporary:
             subprocess.run(  # noqa: S603 - fixed arguments
                 [
                     str(Path(sys.executable).with_name("workflowval")),
@@ -340,16 +347,16 @@ def run_once(build: str, round_number: int) -> tuple[dict[str, Any], list[dict[s
                     "--max-steps",
                     str(MAX_STEPS),
                 ],
-                cwd=folder,
+                cwd=temporary,
                 env={k: v for k, v in env.items() if k != "SEEDED_BUILD"},
                 check=False,
             )
-            work = Path(folder)
+            work = Path(temporary)
             results = json.loads((work / "results.json").read_text())
             workflows = [
                 json.loads(path.read_text()) for path in sorted((work / "workflows").glob("*.json"))
             ]
-            kept = LEDGER.parent / f"round-{round_number}-{build}"
+            kept = folder / f"round-{round_number}-{build}"
             shutil.rmtree(kept, ignore_errors=True)
             shutil.copytree(work, kept, ignore=shutil.ignore_patterns("__pycache__"))
     finally:
@@ -391,9 +398,8 @@ def render_table(buggy: list[dict[str, Any]], clean: list[dict[str, Any]]) -> st
     return "\n".join(lines) + "\n"
 
 
-def rescore(labels: dict[str, Any]) -> int:
-    """Score the saved runs again, with no model and no cost."""
-    folder = LEDGER.parent
+def rescore(folder: Path, labels: dict[str, Any]) -> int:
+    """Score one model's saved runs again, with no model and no cost."""
     buggy, clean = [], []
     for path in sorted(folder.glob("round-*-buggy")):
         workflows = [json.loads(item.read_text()) for item in sorted(path.glob("workflows/*.json"))]
@@ -419,10 +425,12 @@ def main() -> int:
     parser.add_argument("--rescore", action="store_true", help="Score saved runs, at no cost")
     args = parser.parse_args()
     labels = json.loads((SEEDED / "labels.json").read_text())
-    if args.rescore:
-        return rescore(labels)
-    if not os.environ.get("WORKFLOWVAL_MODEL"):
+    model = os.environ.get("WORKFLOWVAL_MODEL")
+    if not model:
         parser.error("set WORKFLOWVAL_MODEL")
+    folder = runs_folder(model)
+    if args.rescore:
+        return rescore(folder, labels)
     buggy_scores: list[dict[str, Any]] = []
     clean_scores: list[dict[str, Any]] = []
     for number in range(1, args.rounds + 1):
@@ -430,7 +438,7 @@ def main() -> int:
             if not next_run_is_allowed(spent(), args.limit):
                 print(f"Stopping: another run could pass ${args.limit}. Spent ${sum(spent()):.4f}.")
                 return 3
-            results, workflows = run_once(build, number)
+            results, workflows = run_once(build, number, folder)
             if results.get("unpriced_calls"):
                 print("Stopping: a run had calls with no known price, so spend isn't reliable.")
                 return 3
@@ -441,8 +449,8 @@ def main() -> int:
                 clean_scores.append(score_clean(results))
                 print(json.dumps(clean_scores[-1]))
     table = render_table(buggy_scores, clean_scores)
-    (LEDGER.parent / "summary.md").write_text(table, encoding="utf-8")
-    (LEDGER.parent / "scores.json").write_text(
+    (folder / "summary.md").write_text(table, encoding="utf-8")
+    (folder / "scores.json").write_text(
         json.dumps({"buggy": buggy_scores, "clean": clean_scores}, indent=2), encoding="utf-8"
     )
     print(table)

@@ -274,3 +274,10 @@ def test_a_test_that_never_reached_the_refund_is_not_a_detection() -> None:
     assert bug(bench.score_buggy(results(reached), [flow], LABELS), "refund_after_partial_cancel")[
         "detected"
     ]
+
+
+def test_each_model_keeps_its_runs_apart_inside_the_ignored_folder() -> None:
+    first = bench.runs_folder("vendor/model-a")
+    assert first != bench.runs_folder("vendor/model-b")
+    assert first.parent == bench.LEDGER.parent
+    assert "/" not in first.name
