@@ -102,3 +102,9 @@ def test_no_model_name_is_written_into_the_code() -> None:
 
 def test_style_rules_live_in_one_place() -> None:
     assert (SOURCE / "gen" / "style.md").is_file()
+
+
+def test_the_prompts_say_how_a_spec_docs_disagreement_gets_tested() -> None:
+    assert "expects what the docs say" in load_prompt("task_plan")
+    assert "expects what the docs say" in load_prompt("task_review_plan")
+    assert "expects what the docs say" in load_prompt("reviewer")

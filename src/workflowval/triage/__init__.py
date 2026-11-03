@@ -21,10 +21,13 @@ def classify(status: int | None, mismatches: Sequence[str]) -> str:
     """Run the deterministic checks on a failure. This is a hint: the Reviewer decides the label."""
     if status is not None and status >= 500:
         return f"the API returned {status}, so this is likely an API_BUG"
+    # A status the spec doesn't list isn't a schema mismatch: it may be the API that's wrong.
+    schema = [text for text in mismatches if not text.startswith("status ")]
+    if schema:
+        joined = "; ".join(schema)
+        return f"the response breaks the spec's schema, so this is likely SPEC_DRIFT: {joined}"
     if mismatches:
-        return "the response breaks the spec, so this is likely SPEC_DRIFT: " + "; ".join(
-            mismatches
-        )
+        return "; ".join(mismatches)
     return "no automatic signal"
 
 
