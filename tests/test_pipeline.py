@@ -23,7 +23,14 @@ from workflowval.gen import lint_source
 from workflowval.loop import Budget, StopReason
 from workflowval.models import FakeModel, Reply, call
 from workflowval.pipeline import TestConfig, auth_env_names, run_test_pipeline
-from workflowval.schemas import ApiKeyAuth, AuthConfig, BasicAuth, BearerAuth, LoginAuth
+from workflowval.schemas import (
+    ApiKeyAuth,
+    AuthConfig,
+    BasicAuth,
+    BearerAuth,
+    LoginAuth,
+    Workflow,
+)
 from workflowval.spec import SpecError
 from workflowval.testrun import is_reachable, run_tests
 
@@ -699,7 +706,7 @@ def test_cli_test_prints_results_and_exits_zero_when_green(
     assert "stopped: completed" in result.output
 
 
-def test_cli_test_exits_non_zero_on_a_real_failure(
+def test_cli_exits_zero_on_a_reviewed_failure_and_lists_it_apart_from_passes(
     items_api: ItemsApi,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -709,8 +716,24 @@ def test_cli_test_exits_non_zero_on_a_real_failure(
     (tmp_path / "s.json").write_text(json.dumps(spec()))
     scripted(planner=PLANNED, reviewer=[verdict("API_BUG"), DONE])
     result = invoke(tmp_path, monkeypatch, ["test", "s.json", "--base-url", items_api.url])
+    assert result.exit_code == 0, result.output
+    assert "EXPECTED    item_lifecycle (API_BUG): reason for API_BUG" in result.output
+    assert "0 passed, 1 expected to fail (API_BUG)" in result.output
+
+
+def test_cli_exits_non_zero_when_a_failure_has_no_label(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    items_api.broken_get = True
+    (tmp_path / "s.json").write_text(json.dumps(spec()))
+    scripted(planner=PLANNED, reviewer=[DONE])
+    result = invoke(tmp_path, monkeypatch, ["test", "s.json", "--base-url", items_api.url])
     assert result.exit_code == cli.EXIT_FAILURES
-    assert "API_BUG     item_lifecycle: reason for API_BUG" in result.output
+    assert "UNRESOLVED" in result.output
+    assert "1 failed" in result.output
 
 
 def test_cli_shows_expectation_changes(
@@ -884,3 +907,212 @@ def test_cost_tracking_switch(
 ) -> None:
     monkeypatch.setenv("WORKFLOWVAL_COST_TRACKING", env)
     assert cli._cost_tracked(flag) is expected
+
+
+def marked_run(items_api: ItemsApi, tmp_path: Path) -> Any:
+    items_api.broken_get = True
+    return run_test_pipeline(config(items_api, tmp_path, PLANNED, [verdict("API_BUG"), DONE]))
+
+
+def read_workflow(tmp_path: Path) -> dict[str, Any]:
+    path = tmp_path / "workflows" / "item_lifecycle.json"
+    workflow: dict[str, Any] = json.loads(path.read_text())
+    return workflow
+
+
+def run_saved(items_api: ItemsApi, tmp_path: Path) -> Any:
+    return run_tests(tmp_path / "tests" / "wf", base_url=items_api.url)[0]
+
+
+def test_a_reviewed_failure_is_pinned_to_its_step_and_status(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    report = marked_run(items_api, tmp_path)
+    issue = read_workflow(tmp_path)["known_issue"]
+    assert issue["label"] == "API_BUG"
+    assert issue["step"] == 1
+    assert issue["check"] == "status"
+    assert issue["status"] == 500
+    test = report.results.tests[0]
+    assert test.status.value == "xfailed"
+    assert test.verdict.label.value == "API_BUG"
+    assert report.results.label_counts == {"API_BUG": 1}
+    assert not report.results.has_unexpected_failures
+    assert report.results.summary() == "0 passed, 1 expected to fail (API_BUG)"
+    assert items_api.items == {}, "cleanup must still run for an expected failure"
+
+
+def test_marking_leaves_every_expectation_alone(items_api: ItemsApi, tmp_path: Path) -> None:
+    marked_run(items_api, tmp_path)
+    saved = Workflow.model_validate(read_workflow(tmp_path))
+    assert saved.steps == Workflow.model_validate(lifecycle()).steps
+    assert (
+        "assert response.status_code == 200"
+        in (tmp_path / "tests" / "wf" / "test_item_lifecycle.py").read_text()
+    )
+
+
+def test_a_marked_failure_needs_no_model_on_the_next_run(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    marked_run(items_api, tmp_path)
+    report = run_test_pipeline(config(items_api, tmp_path))
+    assert report.results.tests[0].status.value == "xfailed"
+    assert report.results.tests[0].verdict.reason == "reason for API_BUG"
+    assert report.run.state.steps_used == 0
+
+
+def test_plain_pytest_also_treats_the_marked_failure_as_expected(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    marked_run(items_api, tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "."],
+        cwd=tmp_path / "tests" / "wf",
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"WORKFLOWVAL_BASE_URL": items_api.url, "PATH": ""},
+    )
+    assert result.returncode == 0, result.stdout
+    assert "1 xfailed" in result.stdout
+
+
+def test_a_different_failure_is_not_excused(items_api: ItemsApi, tmp_path: Path) -> None:
+    marked_run(items_api, tmp_path)
+    workflow = read_workflow(tmp_path)
+    workflow["known_issue"]["status"] = 503
+    (tmp_path / "workflows" / "item_lifecycle.json").write_text(json.dumps(workflow))
+    report = run_test_pipeline(config(items_api, tmp_path, reviewer=[DONE]))
+    assert report.results.tests[0].status.value == "failed"
+    assert report.results.has_unexpected_failures
+
+
+def test_a_failure_at_another_step_is_not_excused(items_api: ItemsApi, tmp_path: Path) -> None:
+    marked_run(items_api, tmp_path)
+    workflow = read_workflow(tmp_path)
+    workflow["known_issue"]["step"] = 2
+    (tmp_path / "workflows" / "item_lifecycle.json").write_text(json.dumps(workflow))
+    report = run_test_pipeline(config(items_api, tmp_path, reviewer=[DONE]))
+    assert report.results.tests[0].status.value == "failed"
+
+
+def test_a_fixed_bug_passes_is_reported_and_loses_its_mark(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    marked_run(items_api, tmp_path)
+    items_api.broken_get = False
+    assert run_saved(items_api, tmp_path).looks_fixed
+    report = run_test_pipeline(config(items_api, tmp_path))
+    assert report.results.tests[0].status.value == "passed"
+    assert report.results.tests[0].verdict is None
+    assert report.looks_fixed == ["item_lifecycle: reason for API_BUG"]
+    assert "known_issue" not in read_workflow(tmp_path)
+    assert (
+        "expected_failure" not in (tmp_path / "tests" / "wf" / "test_item_lifecycle.py").read_text()
+    )
+
+
+def test_plain_pytest_says_when_a_marked_test_passes(items_api: ItemsApi, tmp_path: Path) -> None:
+    marked_run(items_api, tmp_path)
+    items_api.broken_get = False
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "."],
+        cwd=tmp_path / "tests" / "wf",
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"WORKFLOWVAL_BASE_URL": items_api.url, "PATH": ""},
+    )
+    assert result.returncode == 0, result.stdout
+    assert "this may be fixed: API_BUG: reason for API_BUG" in result.stdout
+
+
+def test_a_wrong_value_is_pinned_to_the_body_check(items_api: ItemsApi, tmp_path: Path) -> None:
+    steps = lifecycle()["steps"]
+    steps[1]["expect"]["body"] = {"$.name": "something else"}
+    planned = [call("write_workflow", workflow=lifecycle(steps=steps)), DONE, DONE]
+    report = run_test_pipeline(config(items_api, tmp_path, planned, [verdict("SPEC_DRIFT"), DONE]))
+    issue = read_workflow(tmp_path)["known_issue"]
+    assert (issue["step"], issue["check"]) == (1, "body")
+    assert "status" not in issue
+    assert report.results.tests[0].status.value == "xfailed"
+
+
+def test_a_test_bug_or_unresolved_failure_is_never_marked(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    report = run_test_pipeline(
+        config(items_api, tmp_path, PLANNED, [DONE], budget=Budget(max_fix_attempts=1))
+    )
+    assert "known_issue" not in read_workflow(tmp_path)
+    assert report.results.has_unexpected_failures
+
+
+def test_a_locked_workflow_is_never_marked(items_api: ItemsApi, tmp_path: Path) -> None:
+    items_api.broken_get = True
+    folder = tmp_path / "workflows"
+    folder.mkdir()
+    locked = lifecycle(source="user", locked=True)
+    (folder / "item_lifecycle.json").write_text(json.dumps(locked))
+    before = (folder / "item_lifecycle.json").read_text()
+    report = run_test_pipeline(
+        config(items_api, tmp_path, [DONE, DONE], [verdict("API_BUG"), DONE])
+    )
+    assert (folder / "item_lifecycle.json").read_text() == before
+    assert report.results.tests[0].status.value == "failed"
+    assert report.results.tests[0].verdict.label.value == "API_BUG"
+    assert report.results.has_unexpected_failures
+
+
+def test_a_test_the_writer_fixed_is_not_regenerated_by_marking(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    test_file = tmp_path / "tests" / "wf" / "test_item_lifecycle.py"
+    edited = test_file.read_text() + "# fixed by the Writer\n"
+    test_file.write_text(edited)
+    items_api.broken_get = True
+    report = run_test_pipeline(config(items_api, tmp_path, reviewer=[verdict("API_BUG"), DONE]))
+    assert test_file.read_text() == edited
+    assert "known_issue" not in read_workflow(tmp_path)
+    assert report.results.tests[0].status.value == "failed"
+    assert report.results.tests[0].verdict.label.value == "API_BUG"
+
+
+def test_cli_run_uses_no_model_and_counts_expected_failures(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marked_run(items_api, tmp_path)
+    result = invoke(tmp_path, monkeypatch, ["run", "tests/wf", "--base-url", items_api.url])
+    assert result.exit_code == 0, result.output
+    assert "EXPECTED    item_lifecycle: API_BUG: reason for API_BUG" in result.output
+    assert "0 passed, 1 expected to fail, 0 failed" in result.output
+
+
+def test_cli_run_says_when_a_marked_test_looks_fixed(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marked_run(items_api, tmp_path)
+    items_api.broken_get = False
+    result = invoke(tmp_path, monkeypatch, ["run", "tests/wf", "--base-url", items_api.url])
+    assert result.exit_code == 0, result.output
+    assert "LOOKS FIXED item_lifecycle" in result.output
+
+
+def test_cli_run_fails_on_a_different_failure(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marked_run(items_api, tmp_path)
+    test_file = tmp_path / "tests" / "wf" / "test_item_lifecycle.py"
+    test_file.write_text(test_file.read_text().replace("== 500", "== 503"))
+    result = invoke(tmp_path, monkeypatch, ["run", "tests/wf", "--base-url", items_api.url])
+    assert result.exit_code == cli.EXIT_FAILURES
+    assert "1 failed" in result.output

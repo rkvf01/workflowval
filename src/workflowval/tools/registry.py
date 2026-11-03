@@ -315,7 +315,8 @@ def _expectation_changes(old: Workflow, new: Workflow) -> list[str]:
 
 def write_workflow(args: WriteWorkflowArgs, context: ToolContext) -> str:
     """Create or replace workflows/<id>.json. Refuses locked files, and can't create them."""
-    workflow = args.workflow
+    # Only the pipeline marks failures as expected. A rewrite gets judged afresh on its next run.
+    workflow = args.workflow.model_copy(update={"known_issue": None})
     if workflow.locked or workflow.source is Source.USER:
         raise ToolError("agents can't create locked or user-sourced workflows")
     _check_against_spec(workflow, context)

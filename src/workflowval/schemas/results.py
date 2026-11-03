@@ -43,6 +43,9 @@ class TestStatus(StrEnum):
     XPASSED = "xpassed"
 
 
+_OK_STATUSES = frozenset({TestStatus.PASSED, TestStatus.XFAILED})
+
+
 class ActionKind(StrEnum):
     """What was done about a failure."""
 
@@ -132,6 +135,26 @@ class RunResults(Strict):
     output_tokens: int = Field(default=0, ge=0)
     cost_usd: float = Field(default=0.0, ge=0, description="Sum over calls with a known price")
     unpriced_calls: int = Field(default=0, ge=0, description="Calls missing from cost_usd")
+
+    @property
+    def has_unexpected_failures(self) -> bool:
+        """True when a test failed in a way nobody has reviewed and marked as expected."""
+        return any(t.status not in _OK_STATUSES for t in self.tests)
+
+    def summary(self) -> str:
+        """One line of counts, keeping expected failures apart from passes."""
+        passed = sum(t.status is TestStatus.PASSED for t in self.tests)
+        parts = [f"{passed} passed"]
+        expected = Counter(
+            t.verdict.label.value
+            for t in self.tests
+            if t.status is TestStatus.XFAILED and t.verdict is not None
+        )
+        parts += [f"{n} expected to fail ({label})" for label, n in sorted(expected.items())]
+        failed = len(self.tests) - passed - sum(expected.values())
+        if failed:
+            parts.append(f"{failed} failed")
+        return ", ".join(parts)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

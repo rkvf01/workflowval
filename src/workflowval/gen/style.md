@@ -12,4 +12,6 @@ the rules below on its edits.
 - No secrets in test files: credentials come from env vars inside `conftest.py`.
 - Only these imports: pytest, httpx, json, re, uuid, time, datetime.
 - No `skip` or `xfail`, and no fewer assertions than before. A real failure must stay visible.
+- Only code may mark a reviewed failure as expected, through `known_issue` in the workflow file. It
+  excuses that one check on that one step, and any other failure still fails the test.
 - `ruff` passes (rules E, F, I, B; line length isn't enforced on long literals).

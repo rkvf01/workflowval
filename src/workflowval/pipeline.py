@@ -39,6 +39,7 @@ from workflowval.schemas import (
     Confidence,
     Evidence,
     HttpExchange,
+    KnownIssue,
     Label,
     LoginAuth,
     RunResults,
@@ -60,6 +61,7 @@ PLANNER_TOOLS = frozenset({"read_spec", "read_docs", "read_workflows", "write_wo
 REVIEWER_TOOLS = frozenset(
     {"read_spec", "read_docs", "read_workflows", "read_results", "write_verdict"}
 )
+EXPECTABLE_LABELS = frozenset({"API_BUG", "SPEC_DRIFT", "CONFLICT"})
 WRITER_TOOLS = frozenset(
     {"read_spec", "read_workflows", "read_results", "read_tests", "write_test"}
 )
@@ -94,6 +96,7 @@ class TestRunReport:
     results_path: Path
     expectation_changes: list[str]
     planned: bool
+    looks_fixed: list[str] = field(default_factory=list)
 
 
 def auth_env_names(auth: AuthConfig | None) -> list[str]:
@@ -128,6 +131,35 @@ def _write_test_if_changed(workflow: Workflow, graph: SpecGraph, workdir: Path) 
     atomic_write_text(path, generate(workflow, graph).source)
 
 
+def _is_unedited(workflow: Workflow, graph: SpecGraph, workdir: Path) -> bool:
+    """True when a workflow's test is exactly what code renders, so no fix would be lost."""
+    path = workdir / test_path(workflow.id)
+    return path.is_file() and path.read_text(encoding="utf-8") == generate(workflow, graph).source
+
+
+def _known_issue_from(
+    workflow: Workflow, outcome: Outcome, verdict: StoredVerdict
+) -> KnownIssue | None:
+    """Pin a reviewed failure to its step and check. None when it isn't tied to a response."""
+    index = outcome.steps_run - 1
+    if not 0 <= index < len(workflow.steps) or not outcome.exchanges:
+        return None
+    seen = outcome.exchanges[-1].get("status")
+    if seen is None:
+        return None
+    wrong_status = seen != workflow.steps[index].expect.status
+    return KnownIssue.model_validate(
+        {
+            "label": verdict.label.value,
+            "confidence": verdict.confidence,
+            "reason": verdict.reason,
+            "step": index,
+            "check": "status" if wrong_status else "body",
+            "status": seen if wrong_status else None,
+        }
+    )
+
+
 def _failure_text(outcome: Outcome) -> str:
     return outcome.failing_assertion or f"the test ended with status {outcome.status}"
 
@@ -142,6 +174,7 @@ class _Session:
         self.workdir = config.workdir
         self.outcomes: dict[str, Outcome] = {}
         self.needs_planning = True
+        self.looks_fixed: list[str] = []
         scheme = config.auth.scheme if config.auth else None
         self.login_operations = {scheme.op} if isinstance(scheme, LoginAuth) else set()
         self.planner = make_role("planner", config.models["planner"], PLANNER_TOOLS)
@@ -182,7 +215,11 @@ class _Session:
             json.dumps({key: vars(value) for key, value in self.outcomes.items()}, default=str),
         )
         return [
-            TestOutcome(test_id(o.workflow_id), o.passed, "" if o.passed else _failure_text(o))
+            TestOutcome(
+                test_id(o.workflow_id),
+                o.passed or o.expected,
+                "" if o.passed or o.expected else _failure_text(o),
+            )
             for o in outcomes
         ]
 
@@ -206,9 +243,82 @@ class _Session:
                 except GenerationError as exc:
                     raise StopRun(StopReason.INVALID_OUTPUT, f"{workflow_id}: {exc}") from exc
 
+    def _save_and_render(self, workflow: Workflow) -> None:
+        atomic_write_text(
+            self.workdir / "workflows" / f"{workflow.id}.json",
+            workflow.model_dump_json(indent=2, exclude_none=True) + "\n",
+        )
+        atomic_write_text(
+            self.workdir / test_path(workflow.id), generate(workflow, self.graph).source
+        )
 
-def _final_verdict(status: str, stored: StoredVerdict | None, outcome: Outcome) -> Verdict | None:
-    if status == "passed":
+    def update_known_issues(self, ctx: RunContext) -> None:
+        """Mark real failures as expected, then confirm the mark with one run. No model involved.
+
+        A locked file is never edited, and a test the Writer fixed by hand is never regenerated, so
+        those failures simply stay failing.
+        """
+        verdicts = read_verdicts(self.workdir)
+        marked: list[str] = []
+        for workflow in load_workflows(self.workdir):
+            key = test_id(workflow.id)
+            outcome = self.outcomes.get(key)
+            verdict = verdicts.get(key)
+            if (
+                outcome is None
+                or outcome.passed
+                or outcome.expected
+                or verdict is None
+                or verdict.label.value not in EXPECTABLE_LABELS
+                or ctx.state.closed_tests.get(key) != verdict.label.value
+                or workflow.locked
+                or not _is_unedited(workflow, self.graph, self.workdir)
+            ):
+                continue
+            issue = _known_issue_from(workflow, outcome, verdict)
+            if issue is not None:
+                self._save_and_render(workflow.model_copy(update={"known_issue": issue}))
+                marked.append(workflow.id)
+        if marked:
+            rerun = run_tests(
+                self.workdir / "tests" / "wf",
+                base_url=self.base_url,
+                workflow_ids=marked,
+                env_names=auth_env_names(self.config.auth),
+            )
+            for outcome in rerun:
+                self.outcomes[test_id(outcome.workflow_id)] = outcome
+        self._clear_fixed()
+
+    def _clear_fixed(self) -> None:
+        """Remove the mark from a test that now passes. The bug looks fixed."""
+        for workflow in load_workflows(self.workdir):
+            outcome = self.outcomes.get(test_id(workflow.id))
+            if (
+                workflow.known_issue is not None
+                and outcome is not None
+                and outcome.passed
+                and not workflow.locked
+            ):
+                self.looks_fixed.append(f"{workflow.id}: {workflow.known_issue.reason}")
+                self._save_and_render(workflow.model_copy(update={"known_issue": None}))
+
+
+def _expected_verdict(issue: KnownIssue, outcome: Outcome) -> Verdict:
+    return Verdict(
+        label=Label(issue.label),
+        confidence=Confidence(issue.confidence),
+        reason=issue.reason,
+        evidence=Evidence(exchanges=[HttpExchange.model_validate(e) for e in outcome.exchanges]),
+    )
+
+
+def _final_verdict(
+    status: str, stored: StoredVerdict | None, outcome: Outcome, issue: KnownIssue | None
+) -> Verdict | None:
+    if outcome.expected and issue is not None:
+        return _expected_verdict(issue, outcome)
+    if status == "passed" or outcome.passed:
         return None
     label = Label(status)
     if stored is not None and stored.label is label:
@@ -238,7 +348,7 @@ def _build_results(session: _Session, run_result: RunResult) -> RunResults:
         workflow = workflows.get(workflow_id)
         if workflow is None:
             continue
-        verdict = _final_verdict(status, verdicts.get(key), outcome)
+        verdict = _final_verdict(status, verdicts.get(key), outcome, workflow.known_issue)
         tests.append(
             TestResult(
                 id=key,
@@ -296,6 +406,7 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
         steps += [
             CodeStep("render_tests", session.render_tests),
             FixLoop("test_and_fix", session.execute, session.label, session.fix),
+            CodeStep("update_known_issues", session.update_known_issues),
         ]
     result = run(
         Pipeline(tuple(steps)),
@@ -315,4 +426,5 @@ def run_test_pipeline(config: TestConfig) -> TestRunReport:
         results_path,
         _read_expectation_changes(config.workdir),
         session.needs_planning,
+        session.looks_fixed,
     )

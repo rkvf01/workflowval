@@ -15,7 +15,7 @@ from workflowval import __version__
 from workflowval.loop import Budget, StopReason
 from workflowval.models import LiteLLMModel, Model
 from workflowval.pipeline import TestConfig, TestRunReport, auth_env_names, run_test_pipeline
-from workflowval.schemas import AuthConfig, load_json
+from workflowval.schemas import AuthConfig, TestStatus, load_json
 from workflowval.spec import SpecError, build_graph, load_spec
 from workflowval.testrun import run_tests
 from workflowval.tools import ROLE_TOOLS
@@ -221,10 +221,15 @@ def _print_report(report: TestRunReport) -> None:
         verdict = test.verdict
         if verdict is None:
             typer.echo(f"PASSED      {test.workflow_id}")
+        elif test.status is TestStatus.XFAILED:
+            typer.echo(f"EXPECTED    {test.workflow_id} ({verdict.label.value}): {verdict.reason}")
         else:
             typer.echo(f"{verdict.label.value:<11} {test.workflow_id}: {verdict.reason}")
     for change in report.expectation_changes:
         typer.echo(f"CHANGED     {change}")
+    for fixed in report.looks_fixed:
+        typer.echo(f"LOOKS FIXED {fixed}")
+    typer.echo(report.results.summary())
     if report.results.uncovered_operations:
         operations = ", ".join(report.results.uncovered_operations)
         typer.echo(f"NOT COVERED {operations}")
@@ -310,7 +315,7 @@ def test_command(
     )
     _print_report(outcome)
     clean = outcome.run.stop_reason is StopReason.COMPLETED
-    if not clean or any(test.verdict is not None for test in outcome.results.tests):
+    if not clean or outcome.results.has_unexpected_failures:
         raise typer.Exit(EXIT_FAILURES)
 
 
@@ -378,9 +383,18 @@ def run_command(
         typer.echo(f"No tests found in {tests}", err=True)
         raise typer.Exit(EXIT_FAILURES)
     for outcome in outcomes:
-        detail = "" if outcome.passed else f": {outcome.failing_assertion}"
-        typer.echo(f"{outcome.status.upper():<11} {outcome.workflow_id}{detail}")
-    if not all(outcome.passed for outcome in outcomes):
+        if outcome.looks_fixed:
+            typer.echo(f"LOOKS FIXED {outcome.workflow_id}: {outcome.known_issue}")
+        elif outcome.expected:
+            typer.echo(f"EXPECTED    {outcome.workflow_id}: {outcome.known_issue}")
+        else:
+            detail = "" if outcome.passed else f": {outcome.failing_assertion}"
+            typer.echo(f"{outcome.status.upper():<11} {outcome.workflow_id}{detail}")
+    passed = sum(outcome.passed for outcome in outcomes)
+    expected = sum(outcome.expected for outcome in outcomes)
+    failed = len(outcomes) - passed - expected
+    typer.echo(f"{passed} passed, {expected} expected to fail, {failed} failed")
+    if failed:
         raise typer.Exit(EXIT_FAILURES)
 
 

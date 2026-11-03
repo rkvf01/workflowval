@@ -7,6 +7,8 @@ import pytest
 
 from workflowval.gen import (
     GenerationError,
+    SourceError,
+    check_test_source,
     format_source,
     generate,
     lint_source,
@@ -240,3 +242,38 @@ def test_format_source_rejects_broken_code() -> None:
 
     with pytest.raises(SourceError, match="can't be formatted"):
         format_source("def (:\n")
+
+
+ISSUE = {"label": "API_BUG", "confidence": "med", "reason": "it's a 500", "step": 0}
+
+
+def test_a_status_issue_excuses_only_that_status_on_that_step() -> None:
+    issue = {**ISSUE, "check": "status", "status": 500}
+    source = render([create_step()], known_issue=issue)
+    assert 'api.known_issue("API_BUG: it\'s a 500")' in source
+    assert "if response.status_code == 500:\n        api.expected_failure()" in source
+    assert "assert response.status_code == 201" in source
+
+
+def test_a_body_issue_wraps_only_the_body_checks() -> None:
+    step = create_step(expect={"status": 201, "body": {"$.name": "x"}})
+    source = render([step], known_issue={**ISSUE, "check": "body"})
+    assert "with api.expected_failure_on_assert():" in source
+    before, after = source.split("with api.expected_failure_on_assert():")
+    assert "assert response.status_code == 201" in before
+    assert "assert api.value(response, '$.name')" in after.replace('"', "'")
+
+
+def test_reason_text_cannot_become_code() -> None:
+    issue = {**ISSUE, "check": "body", "reason": 'x"); import os; os.system("boom'}
+    source = render([create_step()], known_issue=issue)
+    assert "import os" not in [line.strip() for line in source.splitlines()]
+
+
+def test_the_writer_cannot_add_an_expected_failure() -> None:
+    plain = workflow([create_step()])
+    source = render([create_step()]).replace(
+        "assert response.status_code", "api.expected_failure()\n    assert response.status_code"
+    )
+    with pytest.raises(SourceError, match="only a reviewed failure"):
+        check_test_source(source, plain)

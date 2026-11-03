@@ -513,3 +513,10 @@ def test_safe_workflows_are_accepted(
     steps: list[dict[str, Any]], cleanup: list[Any], tmp_path: Path
 ) -> None:
     assert write_steps(tmp_path, steps, cleanup) == "wrote workflows/wf.json"
+
+
+def test_a_model_cannot_mark_a_failure_as_expected(tmp_path: Path) -> None:
+    issue = {"label": "API_BUG", "confidence": "med", "reason": "r", "step": 0, "check": "body"}
+    write(tmp_path, known_issue=issue)
+    saved = next((tmp_path / "workflows").glob("*.json")).read_text()
+    assert "known_issue" not in saved
