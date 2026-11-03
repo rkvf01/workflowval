@@ -199,7 +199,9 @@ class RateLimitError(Exception):
     pass
 
 
-@pytest.mark.parametrize("error", [Provider(429), Provider(503), RateLimitError("slow down")])
+@pytest.mark.parametrize(
+    "error", [Provider(408), Provider(429), Provider(503), RateLimitError("slow down")]
+)
 def test_a_temporary_provider_error_is_tried_again(
     monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:

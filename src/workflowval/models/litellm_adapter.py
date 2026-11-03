@@ -39,7 +39,7 @@ def _is_temporary(exc: Exception) -> bool:
     """True for rate limits, provider outages and dropped connections, which may clear."""
     status = getattr(exc, "status_code", None)
     if isinstance(status, int):
-        return status == 429 or status >= 500
+        return status in (408, 429) or status >= 500
     return type(exc).__name__ in _TEMPORARY_ERRORS
 
 
