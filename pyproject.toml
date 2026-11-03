@@ -22,9 +22,11 @@ workflowval = "workflowval.cli:app"
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.115",
     "mypy>=1.10",
     "pytest-cov>=5",
     "pytest-socket>=0.7",
+    "uvicorn>=0.30",
 ]
 
 [build-system]
