@@ -178,8 +178,8 @@ def test_the_conflict_is_scored_apart_from_the_10_defects() -> None:
 
 def test_two_tests_sharing_a_conflict_report_count_once() -> None:
     flow = workflow("p", step("listOrders"))
-    first = failing("p", "CONFLICT", "page_size")
-    second = failing("p", "CONFLICT", "page_size")
+    first = failing("p", "CONFLICT", "page_size 51 is allowed")
+    second = failing("p", "CONFLICT", "page_size 51 is allowed")
     assert bench.score_buggy(results(first, second), [flow], LABELS)["conflict_reports"] == 1
 
 
@@ -208,6 +208,44 @@ def test_no_run_starts_if_it_could_pass_the_limit(
     costs: list[float], limit: float, allowed: bool
 ) -> None:
     assert bench.next_run_is_allowed(costs, limit) is allowed
+
+
+def test_the_limit_check_judges_by_this_setups_own_runs() -> None:
+    everything = [0.84, 4.3]
+    assert bench.next_run_is_allowed(everything, 6.0, [0.09]) is True
+    assert bench.next_run_is_allowed(everything, 6.0) is False, (
+        "a new setup is judged by the dearest"
+    )
+    assert bench.next_run_is_allowed([5.95], 6.0, [0.09]) is False
+
+
+def test_a_quoted_response_body_is_not_evidence() -> None:
+    flow = workflow("c", step("cancelOrder"))
+    run = results(
+        {
+            **failing("c", "API_BUG", "an empty items list was accepted"),
+            "failing_assertion": '{"total_amount_cents": 5, "created_at": "11/03/2026"}',
+        }
+    )
+    scored = bench.score_buggy(run, [flow], LABELS)
+    assert not bug(scored, "field_renamed")["detected"]
+    assert not bug(scored, "date_format")["detected"]
+
+
+@pytest.mark.parametrize(
+    ("reason", "counts"),
+    [
+        ("page 2 with page_size 2 returned an empty page", False),
+        ("page_size=51 was accepted, while the docs say 50", True),
+        ("the docs cap page_size at 50 and the spec at 100", True),
+    ],
+)
+def test_only_a_request_above_the_docs_limit_counts_for_the_conflict(
+    reason: str, counts: bool
+) -> None:
+    flow = workflow("p", step("listOrders"))
+    scored = bench.score_buggy(results(failing("p", "API_BUG", reason)), [flow], LABELS)
+    assert bug(scored, "page_size_conflict")["detected"] is counts
 
 
 def test_the_table_shows_median_range_and_target() -> None:

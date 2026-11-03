@@ -46,10 +46,14 @@ EVIDENCE = {
     "refund_after_partial_cancel": r"partial|refund",
     "field_renamed": r"total_cents|total_amount",
     "extra_required_field": r"currency",
-    "date_format": r"created_at|date",
+    "date_format": r"created_at|date-time",
     "idempotency_ignored": r"idempot|retry|duplicate",
     "empty_filter_500": r"filter|empty|\b500\b",
-    "page_size_conflict": r"page.?size",
+    # A request above the docs' 50: page_size=2 on a paging test says nothing about this rule.
+    "page_size_conflict": (
+        r"page.?size\D{0,40}(5[1-9]|[6-9]\d|100)\b"
+        r"|\b50\b.{0,80}page.?size|page.?size.{0,80}\b50\b"
+    ),
 }
 NOT_A_DETECTION = frozenset({"TEST_BUG"})
 
@@ -178,9 +182,9 @@ def _items(results: dict[str, Any], workflows: Iterable[dict[str, Any]]) -> list
         if verdict is None:
             continue
         workflow = by_id.get(test["workflow_id"], {"steps": [], "rule": ""})
-        # Only what was found counts. A workflow's rule says what it set out to check, and a test
-        # can fail for another reason before it gets that far.
-        text = " ".join([verdict["reason"], test.get("failing_assertion") or ""])
+        # Only what the verdict says counts. A workflow's rule says what it set out to check, and a
+        # failing assertion can quote a whole response, so neither shows this bug was found.
+        text = verdict["reason"]
         report = (verdict.get("action") or {}).get("path")
         exchanges = tuple(test.get("exchanges") or ())
         items.append(Item(verdict["label"], frozenset(_ops(workflow)), text, report, exchanges))
@@ -274,9 +278,20 @@ def spent() -> list[float]:
     return [json.loads(line)["cost_usd"] for line in LEDGER.read_text().splitlines()]
 
 
-def next_run_is_allowed(costs: list[float], limit: float) -> bool:
-    """Refuse a run that could pass the limit, judging by the dearest run so far."""
-    return sum(costs) + (max(costs) if costs else 0.0) <= limit
+def next_run_is_allowed(costs: list[float], limit: float, setup_costs: list[float] = ()) -> bool:
+    """Refuse a run that could pass the limit, judging by this setup's dearest run so far.
+
+    A setup with no runs yet is judged by the dearest run of any setup.
+    """
+    known = list(setup_costs) or costs
+    return sum(costs) + (max(known) if known else 0.0) <= limit
+
+
+def setup_costs(folder: Path) -> list[float]:
+    """What this setup's saved runs cost."""
+    return [
+        json.loads(path.read_text())["cost_usd"] for path in folder.glob("round-*/results.json")
+    ]
 
 
 def _record(build: str, round_number: int, results: dict[str, Any]) -> None:
@@ -441,7 +456,7 @@ def main() -> int:
     clean_scores: list[dict[str, Any]] = []
     for number in range(1, args.rounds + 1):
         for build in ("buggy", "clean"):
-            if not next_run_is_allowed(spent(), args.limit):
+            if not next_run_is_allowed(spent(), args.limit, setup_costs(folder)):
                 print(f"Stopping: another run could pass ${args.limit}. Spent ${sum(spent()):.4f}.")
                 return 3
             results, workflows = run_once(build, number, folder, args.review_rounds)
