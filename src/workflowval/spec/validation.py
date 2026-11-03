@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,7 +12,6 @@ from openapi_core.exceptions import OpenAPIError
 from openapi_core.testing import MockRequest, MockResponse
 
 _SERVER = "http://workflowval.invalid"
-_QUOTED_VALUE = re.compile(r"^'.*?' is ")
 _MAX_MESSAGE = 300
 
 
@@ -51,13 +50,25 @@ def _from_schema_error(error: Any) -> SpecMismatch:
         "[]" if isinstance(part, int) else f".{part}" for part in error.absolute_path
     )
     message = str(error.message)
-    # Most messages quote the bad value, which varies. A missing field's name must stay in the key.
-    shape = message if error.validator == "required" else _QUOTED_VALUE.sub("value is ", message)
+    # Messages quote the bad value, which varies, so the key uses the rule that was broken. A
+    # missing field's name is in its message.
+    if error.validator == "required":
+        shape = message
+    else:
+        shape = f"{error.validator} {error.validator_value!r}"[:_MAX_MESSAGE]
     return SpecMismatch(f"{path}: {shape}", f"{path}: {message}"[:_MAX_MESSAGE])
 
 
 class ResponseChecker:
     """Checks responses against one spec, whichever host they came from."""
+
+    def check_call(self, call: Mapping[str, Any]) -> list[SpecMismatch]:
+        """Check one recorded call. A 5xx is an API failure, and its body says nothing of drift."""
+        template, status = call.get("template"), call.get("status")
+        if not isinstance(template, str) or not isinstance(status, int) or status >= 500:
+            return []
+        body = str(call.get("raw_body") or "").encode()
+        return self.check(str(call["method"]), template, status, call.get("content_type"), body)
 
     def __init__(self, spec: dict[str, Any], *, validate_spec: bool = False) -> None:
         config = None if validate_spec else Config(spec_validator_cls=None)

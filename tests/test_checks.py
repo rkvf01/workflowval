@@ -255,7 +255,9 @@ def test_drift_in_a_passing_test_is_reviewed_once_and_the_run_still_passes(
         reason="the field was renamed",
     )
     try:
-        report = run_test_pipeline(_config(tmp_path, url, [verdict, Reply(text="done")]))
+        report = run_test_pipeline(
+            _config(tmp_path, url, [verdict, Reply(text="done"), Reply(text="done")])
+        )
     finally:
         server.shutdown()
     results = report.results

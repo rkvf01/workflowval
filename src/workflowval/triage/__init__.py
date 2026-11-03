@@ -13,7 +13,7 @@ from workflowval.loop import Role, RunContext, TestOutcome
 from workflowval.loop.stats import workflow_of
 from workflowval.prompts import render_prompt
 from workflowval.schemas import Label
-from workflowval.spec import ResponseChecker, SpecGraph, SpecMismatch
+from workflowval.spec import ResponseChecker, SpecGraph
 
 
 def classify(status: int | None, mismatches: Sequence[str]) -> str:
@@ -44,15 +44,6 @@ class MismatchGroup:
         return f"finding:{digest}"
 
 
-def call_mismatches(call: Mapping[str, Any], checker: ResponseChecker) -> list[SpecMismatch]:
-    """Check one recorded call. A 5xx is an API failure, so its body says nothing about drift."""
-    template, status = call.get("template"), call.get("status")
-    if not isinstance(template, str) or not isinstance(status, int) or status >= 500:
-        return []
-    body = str(call.get("raw_body") or "").encode()
-    return checker.check(str(call["method"]), template, status, call.get("content_type"), body)
-
-
 def group_mismatches(
     outcomes: Mapping[str, Sequence[Mapping[str, Any]]], checker: ResponseChecker, graph: SpecGraph
 ) -> list[MismatchGroup]:
@@ -60,7 +51,7 @@ def group_mismatches(
     groups: dict[tuple[str, int], MismatchGroup] = {}
     for test_id, calls in sorted(outcomes.items()):
         for call in calls:
-            for mismatch in call_mismatches(call, checker):
+            for mismatch in checker.check_call(call):
                 operation = graph.operation_at(str(call["method"]), str(call["template"]))
                 name = operation.operation_id if operation else str(call["template"])
                 # The same field can mean different things under different statuses.
@@ -148,11 +139,6 @@ def review_finding(
 ) -> StoredVerdict | None:
     """Ask the Reviewer to rule on one mismatch. No recorded verdict leaves it unreviewed."""
     example = group.example
-    pointer = (
-        "/paths/"
-        + str(example.get("template", "")).replace("~", "~0").replace("/", "~1")
-        + f"/{str(example.get('method', '')).lower()}/responses/{example.get('status')}"
-    )
     ctx.run_role(
         reviewer,
         render_prompt(
@@ -162,8 +148,46 @@ def review_finding(
             operations=", ".join(sorted(group.operations)),
             status=str(example.get("status")),
             body=str(example.get("raw_body") or "")[:1500],
-            pointer=pointer,
+            pointer=_pointer(example),
             credentials=credentials,
         ),
     )
     return read_verdicts(ctx.workdir).get(group.finding_id)
+
+
+def _pointer(call: Mapping[str, Any]) -> str:
+    template = str(call.get("template", "")).replace("~", "~0").replace("/", "~1")
+    return f"/paths/{template}/{str(call.get('method', '')).lower()}/responses/{call.get('status')}"
+
+
+def request_report(
+    ctx: RunContext, reporter: Role, *, label: str, reason: str, test_id: str, tests: Sequence[str]
+) -> None:
+    """Have the Reviewer write one bug report for one root cause."""
+    ctx.run_role(
+        reporter,
+        render_prompt(
+            "task_report",
+            label=label,
+            reason=reason,
+            test_id=test_id,
+            tests=", ".join(tests),
+            kind="conflict" if label == "CONFLICT" else "api_bug",
+        ),
+    )
+
+
+def request_patch(
+    ctx: RunContext, reporter: Role, *, reason: str, target: str, call: Mapping[str, Any]
+) -> None:
+    """Have the Reviewer propose one spec patch for one root cause."""
+    ctx.run_role(
+        reporter,
+        render_prompt(
+            "task_patch",
+            reason=reason,
+            target=target,
+            pointer=_pointer(call),
+            body=str(call.get("raw_body") or "")[:1500],
+        ),
+    )

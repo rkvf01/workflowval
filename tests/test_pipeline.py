@@ -33,6 +33,7 @@ from workflowval.schemas import (
 )
 from workflowval.spec import SpecError
 from workflowval.testrun import is_reachable, run_tests
+from workflowval.triage import MismatchGroup
 
 pytestmark = pytest.mark.enable_socket
 DONE = Reply(text="done")
@@ -274,7 +275,9 @@ def test_generated_tests_run_with_plain_pytest_and_no_workflowval(
 def test_a_real_failure_is_labeled_and_never_changed(items_api: ItemsApi, tmp_path: Path) -> None:
     items_api.broken_get = True
     # The workflow file is untouched: Planner and Writer have no replies scripted, so any fix fails.
-    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, [verdict("API_BUG"), DONE]))
+    report = run_test_pipeline(
+        config(items_api, tmp_path, PLANNED, [verdict("API_BUG"), DONE, DONE])
+    )
     assert report.run.tests == {TEST_ID: "API_BUG"}
     test = report.results.tests[0]
     assert test.fix_attempts == 0
@@ -716,7 +719,7 @@ def test_cli_exits_zero_on_a_reviewed_failure_and_lists_it_apart_from_passes(
 ) -> None:
     items_api.broken_get = True
     (tmp_path / "s.json").write_text(json.dumps(spec()))
-    scripted(planner=PLANNED, reviewer=[verdict("API_BUG"), DONE])
+    scripted(planner=PLANNED, reviewer=[verdict("API_BUG"), DONE, DONE])
     result = invoke(tmp_path, monkeypatch, ["test", "s.json", "--base-url", items_api.url])
     assert result.exit_code == 0, result.output
     assert "EXPECTED    item_lifecycle (API_BUG): reason for API_BUG" in result.output
@@ -913,7 +916,7 @@ def test_cost_tracking_switch(
 
 def marked_run(items_api: ItemsApi, tmp_path: Path) -> Any:
     items_api.broken_get = True
-    return run_test_pipeline(config(items_api, tmp_path, PLANNED, [verdict("API_BUG"), DONE]))
+    return run_test_pipeline(config(items_api, tmp_path, PLANNED, [verdict("API_BUG"), DONE, DONE]))
 
 
 def read_workflow(tmp_path: Path) -> dict[str, Any]:
@@ -1034,7 +1037,9 @@ def test_a_wrong_value_is_pinned_to_the_body_check(items_api: ItemsApi, tmp_path
     steps = lifecycle()["steps"]
     steps[1]["expect"]["body"] = {"$.name": "something else"}
     planned = [call("write_workflow", workflow=lifecycle(steps=steps)), DONE, DONE]
-    report = run_test_pipeline(config(items_api, tmp_path, planned, [verdict("SPEC_DRIFT"), DONE]))
+    report = run_test_pipeline(
+        config(items_api, tmp_path, planned, [verdict("SPEC_DRIFT"), DONE, DONE])
+    )
     issue = read_workflow(tmp_path)["known_issue"]
     assert (issue["step"], issue["check"]) == (1, "body")
     assert "status" not in issue
@@ -1060,7 +1065,7 @@ def test_a_locked_workflow_is_never_marked(items_api: ItemsApi, tmp_path: Path) 
     (folder / "item_lifecycle.json").write_text(json.dumps(locked))
     before = (folder / "item_lifecycle.json").read_text()
     report = run_test_pipeline(
-        config(items_api, tmp_path, [DONE, DONE], [verdict("API_BUG"), DONE])
+        config(items_api, tmp_path, [DONE, DONE], [verdict("API_BUG"), DONE, DONE])
     )
     assert (folder / "item_lifecycle.json").read_text() == before
     assert report.results.tests[0].status.value == "failed"
@@ -1076,7 +1081,9 @@ def test_a_test_the_writer_fixed_is_not_regenerated_by_marking(
     edited = test_file.read_text() + "# fixed by the Writer\n"
     test_file.write_text(edited)
     items_api.broken_get = True
-    report = run_test_pipeline(config(items_api, tmp_path, reviewer=[verdict("API_BUG"), DONE]))
+    report = run_test_pipeline(
+        config(items_api, tmp_path, reviewer=[verdict("API_BUG"), DONE, DONE])
+    )
     assert test_file.read_text() == edited
     assert "known_issue" not in read_workflow(tmp_path)
     assert report.results.tests[0].status.value == "failed"
@@ -1118,3 +1125,165 @@ def test_cli_run_fails_on_a_different_failure(
     result = invoke(tmp_path, monkeypatch, ["run", "tests/wf", "--base-url", items_api.url])
     assert result.exit_code == cli.EXIT_FAILURES
     assert "1 failed" in result.output
+
+
+def test_a_real_failure_gets_one_report_linked_from_its_mark(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    report_call = call(
+        "write_bug_report",
+        kind="api_bug",
+        title="Reading an item fails",
+        test_id=TEST_ID,
+        expected="200",
+        actual="500",
+        spec_reference="getItem",
+    )
+    report = run_test_pipeline(
+        config(items_api, tmp_path, PLANNED, [verdict("API_BUG"), DONE, report_call, DONE])
+    )
+    path = tmp_path / "reports" / "bugs" / "reading-an-item-fails.md"
+    text = path.read_text()
+    assert "curl -i -X POST" in text, "the step that created the item"
+    assert "curl -i -X GET" in text, "the step that failed"
+    assert read_workflow(tmp_path)["known_issue"]["report"] == str(path)
+    action = report.results.tests[0].verdict.action
+    assert (action.kind.value, action.path) == ("bug_report", str(path))
+    assert (tmp_path / "reports" / "report.md").is_file()
+    assert (tmp_path / "reports" / "junit.xml").is_file()
+    assert (tmp_path / "reports" / "results.json").is_file()
+
+
+def two_workflows() -> list[Reply]:
+    second = lifecycle(id="item_again")
+    return [
+        call("write_workflow", workflow=lifecycle()),
+        call("write_workflow", workflow=second),
+        DONE,
+        DONE,
+    ]
+
+
+def test_one_root_cause_seen_by_two_tests_gets_one_report(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    other = "tests/wf/test_item_again.py::test_item_again"
+    verdicts = [
+        call("write_verdict", test_id=other, label="API_BUG", confidence="med", reason="same"),
+        DONE,
+        verdict("API_BUG"),
+        DONE,
+    ]
+    report_call = call(
+        "write_bug_report",
+        kind="api_bug",
+        title="One report",
+        test_id=other,
+        expected="200",
+        actual="500",
+        spec_reference="getItem",
+    )
+    report = run_test_pipeline(
+        config(items_api, tmp_path, two_workflows(), [*verdicts, report_call, DONE])
+    )
+    files = list((tmp_path / "reports" / "bugs").glob("*.md"))
+    assert [path.name for path in files] == ["one-report.md"]
+    text = files[0].read_text()
+    assert "test_item_lifecycle" in text
+    assert "test_item_again" in text
+    assert {t.verdict.action.path for t in report.results.tests} == {str(files[0])}
+
+
+def test_a_reports_folder_can_be_chosen(items_api: ItemsApi, tmp_path: Path) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED, reports_dir=tmp_path / "elsewhere"))
+    assert (tmp_path / "elsewhere" / "report.md").is_file()
+    assert not (tmp_path / "reports").exists()
+
+
+def test_plan_only_writes_no_reports(items_api: ItemsApi, tmp_path: Path) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED, plan_only=True))
+    assert not (tmp_path / "reports").exists()
+
+
+def test_cli_run_can_write_reports_with_no_model(
+    items_api: ItemsApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marked_run(items_api, tmp_path)
+    args = ["run", "tests/wf", "--base-url", items_api.url, "--report", "out"]
+    result = invoke(tmp_path, monkeypatch, args)
+    assert result.exit_code == 0, result.output
+    text = (tmp_path / "out" / "report.md").read_text()
+    assert "1 expected to fail (API_BUG)" in text
+    assert "reason for API_BUG" in text
+
+
+def drift_args(url: str) -> list[str]:
+    return ["drift", "openapi.json", "--base-url", url]
+
+
+def test_cli_drift_needs_saved_workflows(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    (tmp_path / "openapi.json").write_text(json.dumps(spec()))
+    scripted()
+    result = invoke(tmp_path, monkeypatch, drift_args(items_api.url))
+    assert result.exit_code == 2
+    assert "run `workflowval test` first" in result.output
+
+
+def test_cli_drift_is_quiet_and_exits_zero_when_the_api_fits(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    scripted()
+    result = invoke(tmp_path, monkeypatch, drift_args(items_api.url))
+    assert result.exit_code == 0, result.output
+    assert "1 passed" in result.output
+
+
+def test_cli_drift_reports_a_confirmed_mismatch_and_exits_non_zero(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    changed = spec()
+    created = changed["paths"]["/items"]["post"]["responses"]["201"]["content"]["application/json"]
+    created["schema"]["required"] = ["missing_field"]
+    (tmp_path / "openapi.json").write_text(json.dumps(changed))
+    group = MismatchGroup("$: 'missing_field' is a required property|201", "m")
+    ruling = call(
+        "write_verdict",
+        test_id=group.finding_id,
+        label="API_BUG",
+        confidence="med",
+        reason="the API lost a field",
+    )
+    # The schema is shared, so two responses show this. Only one ruling is scripted.
+    scripted(reviewer=[ruling, DONE, DONE, DONE])
+    result = invoke(tmp_path, monkeypatch, drift_args(items_api.url))
+    assert result.exit_code == cli.EXIT_FAILURES, result.output
+    assert "MISMATCH    API_BUG" in result.output
+    assert (tmp_path / "reports" / "report.md").is_file()
+
+
+def test_cli_drift_stops_cleanly_when_the_api_is_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scripted: Callable[..., None]
+) -> None:
+    folder = tmp_path / "workflows"
+    folder.mkdir()
+    (folder / "item_lifecycle.json").write_text(json.dumps(lifecycle()))
+    (tmp_path / "openapi.json").write_text(json.dumps(spec()))
+    scripted()
+    result = invoke(tmp_path, monkeypatch, drift_args("http://127.0.0.1:9"))
+    assert result.exit_code == cli.EXIT_FAILURES
+    assert "api_unreachable" in result.output

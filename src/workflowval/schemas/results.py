@@ -154,6 +154,14 @@ class RunResults(Strict):
     cost_usd: float = Field(default=0.0, ge=0, description="Sum over calls with a known price")
     unpriced_calls: int = Field(default=0, ge=0, description="Calls missing from cost_usd")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _ignore_computed_fields(cls, data: Any) -> Any:
+        """`label_counts` is written for readers and computed again on load."""
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if key != "label_counts"}
+        return data
+
     @property
     def has_unexpected_failures(self) -> bool:
         """True when a test failed in a way nobody has reviewed and marked as expected."""

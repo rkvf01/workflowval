@@ -41,7 +41,7 @@ SAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
         {
             "kind": "conflict",
             "title": "t",
-            "curl_steps": ["curl x"],
+            "test_id": "t",
             "expected": "e",
             "actual": "a",
             "spec_reference": "s",
@@ -56,10 +56,7 @@ SAMPLES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
         {"test_id": "t", "patch": []},
     ),
 }
-STUBS = sorted(
-    {"write_review", "answer_review", "run_tests", "http_probe", "write_bug_report"}
-    | {"propose_spec_patch"}
-)
+STUBS = sorted({"write_review", "answer_review", "run_tests", "http_probe"})
 
 
 def context(tmp_path: Path) -> ToolContext:
@@ -223,7 +220,7 @@ def test_write_workflow_cannot_escape_the_workflows_folder(tmp_path: Path) -> No
 BUG_REPORT: dict[str, Any] = {
     "kind": "api_bug",
     "title": "t",
-    "curl_steps": ["curl x"],
+    "test_id": "t",
     "expected": "e",
     "actual": "a",
     "spec_reference": "s",
@@ -236,7 +233,7 @@ CONFLICT_EXTRAS: dict[str, Any] = {
 
 
 def test_an_api_bug_report_does_not_need_the_conflict_fields(tmp_path: Path) -> None:
-    with pytest.raises(ToolError, match="arrives in"):
+    with pytest.raises(ToolError, match="nothing was recorded"):
         TOOLS["write_bug_report"].invoke(BUG_REPORT, context(tmp_path))
 
 

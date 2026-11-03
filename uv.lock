@@ -1320,6 +1320,27 @@ wheels = [
 ]
 
 [[package]]
+name = "jsonpatch"
+version = "1.41"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jsonpointer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/8a/68334b79bea0e6e49e92ce02344f71ebf3538f8e08fee316029263285431/jsonpatch-1.41.tar.gz", hash = "sha256:1aca06402f94e5cd7bc133af0cb4f7b2c2f9c0bc172f9de52c9aa4c6104b0d1c", size = 56504, upload-time = "2026-11-02T22:20:47.779Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ad/0b/7e683efbfa0df2110323ff364cf7d37286f681f33c5012f2806ccf618f85/jsonpatch-1.41-py3-none-any.whl", hash = "sha256:fd493e82a57da7dd60e22ff2521f75d2be3ce41d76a845799d898de6da682922", size = 20261, upload-time = "2026-11-02T22:20:46.099Z" },
+]
+
+[[package]]
+name = "jsonpointer"
+version = "3.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/cf/5d665216bd9dea19dd26ea93ca525ef02936a9cccd0cd856f8408eb77f0b/jsonpointer-3.8.tar.gz", hash = "sha256:a627a255641390bfb4d51d4cfbb90648078ae855b45804ef7e19ea13a4cca355", size = 19212, upload-time = "2026-11-02T21:52:18.838Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/76/61/20f3a497beac4c8f869b8161b468b31c0f05d9d73600da0313eb759bad8a/jsonpointer-3.8-py3-none-any.whl", hash = "sha256:d69af85adaea202111bbc931067ead68dc16bca4592c74e1a1953152e2a330ab", size = 10233, upload-time = "2026-11-02T21:52:17.617Z" },
+]
+
+[[package]]
 name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3201,6 +3222,8 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "jsonpatch" },
+    { name = "jsonpointer" },
     { name = "litellm", extra = ["mcp"] },
     { name = "openapi-core" },
     { name = "openapi-spec-validator" },
@@ -3222,6 +3245,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
+    { name = "jsonpatch", specifier = ">=1.41" },
+    { name = "jsonpointer", specifier = ">=3.8" },
     { name = "litellm", extras = ["mcp"], specifier = ">=1.83" },
     { name = "openapi-core", specifier = ">=0.19" },
     { name = "openapi-spec-validator", specifier = ">=0.7" },

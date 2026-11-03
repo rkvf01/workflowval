@@ -7,10 +7,13 @@ The first 12 tools are the doc's list. `read_tests` and `write_verdict` were add
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
+import jsonpatch
+from jsonpointer import JsonPointerException, resolve_pointer
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from workflowval.gen import (
@@ -21,6 +24,8 @@ from workflowval.gen import (
     lint_source,
     test_path,
 )
+from workflowval.redact import redact_text
+from workflowval.report.curl import curl_steps
 from workflowval.schemas import (
     Answer,
     Basis,
@@ -31,7 +36,7 @@ from workflowval.schemas import (
     Workflow,
     atomic_write_text,
 )
-from workflowval.spec import SpecGraph
+from workflowval.spec import ResponseChecker, SpecGraph
 from workflowval.tools.base import Tool, ToolContext, ToolError
 
 
@@ -39,6 +44,10 @@ class ReadSpecArgs(BaseModel):
     """Arguments for read_spec."""
 
     operation_id: str | None = Field(default=None, description="Omit for the whole graph")
+    pointer: str | None = Field(
+        default=None,
+        description="A JSON Pointer into the spec as written, with its $refs, for a spec patch",
+    )
 
 
 class ReadDocsArgs(BaseModel):
@@ -120,11 +129,11 @@ class WriteVerdictArgs(BaseModel):
 
 
 class WriteBugReportArgs(BaseModel):
-    """Arguments for write_bug_report."""
+    """Arguments for write_bug_report. Code adds the curl steps from what was recorded."""
 
     kind: Literal["api_bug", "conflict"]
     title: str = Field(min_length=1)
-    curl_steps: list[str] = Field(min_length=1)
+    test_id: str = Field(min_length=1, description="The test or finding id this report covers")
     expected: str = Field(min_length=1, description="For a conflict: per spec, and per docs")
     actual: str = Field(min_length=1)
     spec_reference: str = Field(min_length=1)
@@ -186,6 +195,11 @@ def read_spec(args: ReadSpecArgs, context: ToolContext) -> str:
     graph = context.graph
     if graph is None:
         raise ToolError("no spec is loaded")
+    if args.pointer is not None:
+        try:
+            return json.dumps(resolve_pointer(context.raw_spec or {}, args.pointer))
+        except JsonPointerException as exc:
+            raise ToolError(f"nothing at {args.pointer!r}: {exc}") from exc
     if args.operation_id is None:
         return json.dumps(
             {
@@ -396,7 +410,7 @@ def read_results(args: ReadResultsArgs, context: ToolContext) -> str:
 
 def http_probe(args: HttpProbeArgs, context: ToolContext) -> str:
     """Send one request to an allowed host to investigate a failure."""
-    return _stub("M2")(args, context)
+    return _stub("M3")(args, context)
 
 
 def write_verdict(args: WriteVerdictArgs, context: ToolContext) -> str:
@@ -423,14 +437,92 @@ def write_verdict(args: WriteVerdictArgs, context: ToolContext) -> str:
     return f"recorded {args.label.value} for {args.test_id}"
 
 
+def _evidence(context: ToolContext, target: str) -> dict[str, Any]:
+    path = context.workdir / ".workflowval" / "evidence.json"
+    evidence: dict[str, Any] = (
+        json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    )
+    if target not in evidence:
+        raise ToolError(f"nothing was recorded for {target!r}. Recorded: {sorted(evidence)}")
+    found: dict[str, Any] = evidence[target]
+    return found
+
+
+def _reports_dir(context: ToolContext) -> Path:
+    return context.reports_dir or context.workdir / "reports"
+
+
+def _record_report(context: ToolContext, target: str, path: Path) -> str:
+    """Remember which file answers a test or finding, and return its path for the model."""
+    index = context.workdir / ".workflowval" / "reports.json"
+    written = json.loads(index.read_text(encoding="utf-8")) if index.is_file() else {}
+    written[target] = str(path)
+    atomic_write_text(index, json.dumps(written, indent=2) + "\n")
+    return str(path)
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "report"
+
+
 def write_bug_report(args: WriteBugReportArgs, context: ToolContext) -> str:
-    """Write a Markdown report for an API_BUG or a spec-docs CONFLICT, with curl steps."""
-    return _stub("M2")(args, context)
+    """Write a Markdown report for an API_BUG or a spec-docs CONFLICT. Code adds the curl steps."""
+    evidence = _evidence(context, args.test_id)
+    steps = "\n".join(curl_steps(evidence["calls"], context.auth))
+    tests = "\n".join(f"- `{test}`" for test in evidence.get("tests", [args.test_id]))
+    sections = [
+        f"# {args.title}",
+        f"**Kind:** {args.kind}",
+        f"## Tests that show it\n\n{tests}",
+        f"## Steps to reproduce\n\n```\n{steps}\n```",
+        f"## Expected\n\n{args.expected}",
+        f"## Actual\n\n{args.actual}",
+        f"## Spec reference\n\n{args.spec_reference}",
+    ]
+    if args.kind == "conflict":
+        workflows = "\n".join(f"- `{workflow}`" for workflow in args.affected_workflows)
+        sections += [
+            f"## What the docs say\n\n{args.docs_excerpt}",
+            f"## Affected workflows\n\n{workflows}",
+            f"## Suggested resolution\n\n{args.suggested_resolution}",
+        ]
+    path = _reports_dir(context) / "bugs" / f"{_slug(args.title)}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, redact_text("\n\n".join(sections)) + "\n")
+    return f"wrote {_record_report(context, args.test_id, path)}"
 
 
 def propose_spec_patch(args: ProposeSpecPatchArgs, context: ToolContext) -> str:
     """Propose a minimal JSON Patch (RFC 6902) making the spec match observed behaviour."""
-    return _stub("M2")(args, context)
+    evidence = _evidence(context, args.test_id)
+    raw = context.raw_spec
+    if raw is None:
+        raise ToolError("no spec is loaded")
+    operations = [op.model_dump(by_alias=True, exclude_unset=True) for op in args.patch]
+    try:
+        patched = jsonpatch.apply_patch(raw, operations)
+    except (jsonpatch.JsonPatchException, JsonPointerException) as exc:
+        raise ToolError(f"the patch doesn't apply to the spec as written: {exc}") from exc
+    try:
+        checker = ResponseChecker(patched, validate_spec=True)
+        before_checker = ResponseChecker(raw)
+    except Exception as exc:  # openapi-core raises many types for a broken spec.
+        raise ToolError(f"the patched spec isn't valid OpenAPI: {str(exc)[:300]}") from exc
+    calls = evidence["calls"]
+    wanted = evidence.get("keys")
+    before = {m.key for call in calls for m in before_checker.check_call(call)}
+    targets = set(wanted) if wanted else before
+    if not targets:
+        raise ToolError("the recorded response already fits the spec, so there's nothing to patch")
+    after = {m.key for call in calls for m in checker.check_call(call)}
+    if still := sorted(targets & after):
+        raise ToolError(f"the observed response still breaks the patched spec: {still}")
+    if added := sorted(after - before):
+        raise ToolError(f"the patch makes the observed response break the spec: {added}")
+    path = _reports_dir(context) / "patches" / f"{_slug(args.test_id)}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(operations, indent=2) + "\n")
+    return f"wrote {_record_report(context, args.test_id, path)}"
 
 
 def _tool(fn: Callable[[Any, ToolContext], str], schema: type[BaseModel]) -> Tool:
