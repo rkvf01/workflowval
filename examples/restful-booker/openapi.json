@@ -1,0 +1,153 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Restful-booker",
+    "version": "1.0.0",
+    "description": "Written from the published API docs at https://restful-booker.herokuapp.com/apidoc/index.html"
+  },
+  "paths": {
+    "/ping": {
+      "get": {
+        "operationId": "ping",
+        "summary": "Check the API is up",
+        "responses": { "201": { "description": "Up" } }
+      }
+    },
+    "/auth": {
+      "post": {
+        "operationId": "createToken",
+        "summary": "Create a token for updates and deletes",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "required": ["username", "password"],
+            "properties": { "username": { "type": "string" }, "password": { "type": "string" } }
+          } } }
+        },
+        "responses": { "200": {
+          "description": "Token",
+          "content": { "application/json": { "schema": {
+            "type": "object", "properties": { "token": { "type": "string" } }
+          } } }
+        } }
+      }
+    },
+    "/booking": {
+      "get": {
+        "operationId": "getBookingIds",
+        "summary": "List booking ids, optionally filtered",
+        "parameters": [
+          { "name": "firstname", "in": "query", "schema": { "type": "string" } },
+          { "name": "lastname", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": {
+          "description": "Ids",
+          "content": { "application/json": { "schema": {
+            "type": "array",
+            "items": { "type": "object", "properties": { "bookingid": { "type": "integer" } } }
+          } } }
+        } }
+      },
+      "post": {
+        "operationId": "createBooking",
+        "summary": "Create a booking",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Booking" } } }
+        },
+        "responses": { "200": {
+          "description": "Created",
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "bookingid": { "type": "integer" },
+              "booking": { "$ref": "#/components/schemas/Booking" }
+            }
+          } } }
+        } }
+      }
+    },
+    "/booking/{id}": {
+      "parameters": [
+        { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
+      ],
+      "get": {
+        "operationId": "getBooking",
+        "summary": "Get a booking",
+        "responses": {
+          "200": {
+            "description": "The booking",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Booking" } } }
+          },
+          "404": { "description": "No such booking" }
+        }
+      },
+      "put": {
+        "operationId": "updateBooking",
+        "summary": "Replace a booking. Needs the token.",
+        "security": [{ "cookieToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Booking" } } }
+        },
+        "responses": { "200": {
+          "description": "Updated",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Booking" } } }
+        } }
+      },
+      "patch": {
+        "operationId": "partialUpdateBooking",
+        "summary": "Change part of a booking. Needs the token.",
+        "security": [{ "cookieToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "firstname": { "type": "string" },
+              "lastname": { "type": "string" },
+              "totalprice": { "type": "integer" }
+            }
+          } } }
+        },
+        "responses": { "200": {
+          "description": "Updated",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Booking" } } }
+        } }
+      },
+      "delete": {
+        "operationId": "deleteBooking",
+        "summary": "Delete a booking. Needs the token.",
+        "security": [{ "cookieToken": [] }],
+        "responses": { "201": { "description": "Deleted" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "cookieToken": { "type": "apiKey", "in": "cookie", "name": "token" }
+    },
+    "schemas": {
+      "Booking": {
+        "type": "object",
+        "required": ["firstname", "lastname", "totalprice", "depositpaid", "bookingdates"],
+        "properties": {
+          "firstname": { "type": "string" },
+          "lastname": { "type": "string" },
+          "totalprice": { "type": "integer" },
+          "depositpaid": { "type": "boolean" },
+          "bookingdates": {
+            "type": "object",
+            "required": ["checkin", "checkout"],
+            "properties": {
+              "checkin": { "type": "string", "format": "date" },
+              "checkout": { "type": "string", "format": "date" }
+            }
+          },
+          "additionalneeds": { "type": "string" }
+        }
+      }
+    }
+  }
+}

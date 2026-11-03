@@ -3,9 +3,22 @@
 Model-agnostic CLI agent that reads an OpenAPI spec, infers multi-step workflows, writes and runs
 pytest tests against a live API, and triages every failure as a test bug, an API bug or spec drift.
 
-**Status: M0 skeleton.** The CLI commands are stubs. The loop, budgets, model adapters and data
-formats work; nothing tests a real API yet. Requirements are in `workflowreq.md`. Open decisions for
-the data-format review are in `docs/m0-review.md`.
+**Status: M1.** `test`, `plan`, `run` and `inspect` work against a live API. Bug reports, spec
+patches, reports and `drift` arrive in M2. Requirements are in `workflowreq.md`, decisions in
+`docs/m0-review.md`, and changes and known limits in `docs/m1-notes.md`.
+
+## Quickstart
+
+```
+export OPENROUTER_API_KEY=...
+export WORKFLOWVAL_MODEL=openrouter/<vendor>/<model>
+workflowval inspect openapi.json
+workflowval test openapi.json --base-url http://localhost:8000
+workflowval run tests/wf
+```
+
+This writes `workflows/<id>.json`, `tests/wf/test_<id>.py` and `results.json` in the current folder.
+Generated tests run with plain `pytest`. See `benchmarks/targets.md` for the demo targets.
 
 ## Develop
 
@@ -13,7 +26,7 @@ the data-format review are in `docs/m0-review.md`.
 uv sync
 uv run ruff check . && uv run ruff format --check .
 uv run mypy --strict src
-uv run pytest --cov=workflowval.loop --cov-fail-under=80
+uv run pytest --cov=workflowval.loop --cov=workflowval.spec --cov-fail-under=80
 uv run workflowval --help
 ```
 
