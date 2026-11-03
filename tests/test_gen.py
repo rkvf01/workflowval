@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import json
+from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from workflowval.gen import (
@@ -223,6 +227,47 @@ def test_conftest_is_clean_and_holds_no_secret_values(monkeypatch: pytest.Monkey
     }
     assert "workflowval" not in roots
     lint_source(source)
+
+
+def test_a_dotted_login_field_is_sent_nested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph = SpecGraph(
+        operations=[Operation(operation_id="login", method="POST", path="/login", resource="u")]
+    )
+    scheme = {
+        "type": "login",
+        "op": "login",
+        "body_env": {"user.email": "APP_EMAIL", "user.password": "APP_PASS", "plain": "APP_PASS"},
+        "token_path": "$.user.token",
+        "token_header": "Authorization",
+        "token_prefix": "Token ",
+    }
+    auth = AuthConfig.model_validate({"scheme": scheme})
+    path = tmp_path / "rendered_conftest.py"
+    path.write_text(render_conftest("http://localhost:1", auth, graph))
+    module_spec = importlib.util.spec_from_file_location("rendered_conftest", path)
+    assert module_spec is not None
+    assert module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setenv("APP_EMAIL", "a@example.com")
+    monkeypatch.setenv("APP_PASS", "pw")
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"user": {"token": "abc"}})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(answer), auth=module._LoginAuth(module.AUTH)
+    )
+    client.get("http://localhost:1/user")
+    assert json.loads(seen[0].content) == {
+        "user": {"email": "a@example.com", "password": "pw"},
+        "plain": "pw",
+    }
+    assert seen[1].headers["Authorization"] == "Token abc"
 
 
 def test_conftest_without_auth() -> None:

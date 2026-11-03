@@ -45,7 +45,9 @@ class LoginAuth(Strict):
 
     type: Literal["login"]
     op: str = Field(min_length=1, description="Login operationId")
-    body_env: dict[str, EnvVarName] = Field(description="Request body field to env var name")
+    body_env: dict[str, EnvVarName] = Field(
+        description="Request body field to env var name. `user.email` nests the field.",
+    )
     token_path: str = Field(pattern=r"^\$", description="JSONPath of the token in the response")
     token_header: str | None = Field(default=None, description="Override, e.g. Cookie")
     token_prefix: str | None = Field(default=None, description="Override, e.g. token=")

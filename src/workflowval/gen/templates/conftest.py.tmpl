@@ -70,6 +70,18 @@ def _value_at(document: Any, path: str) -> Any:
     return node
 
 
+def _nested(fields: dict[str, str]) -> dict[str, Any]:
+    """Turn `user.email` into {"user": {"email": ...}}, for APIs that nest the login body."""
+    body: dict[str, Any] = {}
+    for name, value in fields.items():
+        *parents, last = name.split(".")
+        node = body
+        for parent in parents:
+            node = node.setdefault(parent, {})
+        node[last] = value
+    return body
+
+
 class _LoginAuth(httpx.Auth):
     """Logs in once, reuses the token and logs in again on a 401."""
 
@@ -86,7 +98,7 @@ class _LoginAuth(httpx.Auth):
         if scheme["method"] == "GET":
             request = httpx.Request("GET", url, params=fields)
         else:
-            request = httpx.Request(scheme["method"], url, json=fields)
+            request = httpx.Request(scheme["method"], url, json=_nested(fields))
         request.headers["Accept"] = "application/json"
         request.extensions["workflowval_login"] = True
         response = yield request
