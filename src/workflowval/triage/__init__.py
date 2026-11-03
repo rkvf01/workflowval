@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -9,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from workflowval.loop import Role, RunContext, TestOutcome
+from workflowval.loop import Role, RunContext, TaskLimitReached, TestOutcome
 from workflowval.loop.stats import workflow_of
 from workflowval.prompts import render_prompt
 from workflowval.schemas import Label
@@ -114,18 +115,19 @@ def label_failures(
     for failure in failures:
         _forget(ctx.workdir, failure.test_id)
         workflow_id = workflow_of({"test_id": failure.test_id})
-        ctx.run_role(
-            reviewer,
-            render_prompt(
-                "task_triage",
-                test_id=failure.test_id,
-                workflow_id=workflow_id or "",
-                failure=failure.message,
-                credentials=credentials,
-                hint=(hints or {}).get(failure.test_id, "no automatic signal"),
-            ),
-            workflow_id,
-        )
+        with contextlib.suppress(TaskLimitReached):
+            ctx.run_role(
+                reviewer,
+                render_prompt(
+                    "task_triage",
+                    test_id=failure.test_id,
+                    workflow_id=workflow_id or "",
+                    failure=failure.message,
+                    credentials=credentials,
+                    hint=(hints or {}).get(failure.test_id, "no automatic signal"),
+                ),
+                workflow_id,
+            )
         verdict = read_verdicts(ctx.workdir).get(failure.test_id)
         if verdict is not None:
             labels[failure.test_id] = verdict.label
@@ -137,19 +139,20 @@ def review_finding(
 ) -> StoredVerdict | None:
     """Ask the Reviewer to rule on one mismatch. No recorded verdict leaves it unreviewed."""
     example = group.example
-    ctx.run_role(
-        reviewer,
-        render_prompt(
-            "task_finding",
-            finding_id=group.finding_id,
-            message=group.message,
-            operations=", ".join(sorted(group.operations)),
-            status=str(example.get("status")),
-            body=str(example.get("raw_body") or "")[:1500],
-            pointer=_pointer(example),
-            credentials=credentials,
-        ),
-    )
+    with contextlib.suppress(TaskLimitReached):
+        ctx.run_role(
+            reviewer,
+            render_prompt(
+                "task_finding",
+                finding_id=group.finding_id,
+                message=group.message,
+                operations=", ".join(sorted(group.operations)),
+                status=str(example.get("status")),
+                body=str(example.get("raw_body") or "")[:1500],
+                pointer=_pointer(example),
+                credentials=credentials,
+            ),
+        )
     return read_verdicts(ctx.workdir).get(group.finding_id)
 
 
@@ -162,30 +165,32 @@ def request_report(
     ctx: RunContext, reporter: Role, *, label: str, reason: str, test_id: str, tests: Sequence[str]
 ) -> None:
     """Have the Reviewer write one bug report for one root cause."""
-    ctx.run_role(
-        reporter,
-        render_prompt(
-            "task_report",
-            label=label,
-            reason=reason,
-            test_id=test_id,
-            tests=", ".join(tests),
-            kind="conflict" if label == "CONFLICT" else "api_bug",
-        ),
-    )
+    with contextlib.suppress(TaskLimitReached):
+        ctx.run_role(
+            reporter,
+            render_prompt(
+                "task_report",
+                label=label,
+                reason=reason,
+                test_id=test_id,
+                tests=", ".join(tests),
+                kind="conflict" if label == "CONFLICT" else "api_bug",
+            ),
+        )
 
 
 def request_patch(
     ctx: RunContext, reporter: Role, *, reason: str, target: str, call: Mapping[str, Any]
 ) -> None:
     """Have the Reviewer propose one spec patch for one root cause."""
-    ctx.run_role(
-        reporter,
-        render_prompt(
-            "task_patch",
-            reason=reason,
-            target=target,
-            pointer=_pointer(call),
-            body=str(call.get("raw_body") or "")[:1500],
-        ),
-    )
+    with contextlib.suppress(TaskLimitReached):
+        ctx.run_role(
+            reporter,
+            render_prompt(
+                "task_patch",
+                reason=reason,
+                target=target,
+                pointer=_pointer(call),
+                body=str(call.get("raw_body") or "")[:1500],
+            ),
+        )

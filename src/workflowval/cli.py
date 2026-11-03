@@ -246,6 +246,8 @@ def _print_report(report: TestRunReport) -> None:
         label = finding.label.value if finding.label else "NOT REVIEWED"
         if finding.label is not Label.TEST_BUG:
             typer.echo(f"MISMATCH    {label}: {finding.message}")
+    for stopped in report.results.tasks_stopped:
+        typer.echo(f"LIMIT       {stopped}")
     typer.echo(report.run.summary)
     typer.echo(f"results: {report.results_path}")
 

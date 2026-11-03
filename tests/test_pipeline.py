@@ -1286,3 +1286,93 @@ def test_cli_drift_stops_cleanly_when_the_api_is_down(
     result = invoke(tmp_path, monkeypatch, drift_args("http://127.0.0.1:9"))
     assert result.exit_code == cli.EXIT_FAILURES
     assert "api_unreachable" in result.output
+
+
+def endless(name: str = "read_spec", count: int = 300, **arguments: Any) -> list[Reply]:
+    """A model that never stops calling tools."""
+    return [call(name, **arguments) for _ in range(count)]
+
+
+def test_a_stuck_fix_stops_at_its_limit_and_the_test_ends_unresolved(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    steps = lifecycle()["steps"]
+    steps[0]["expect"]["status"] = 299
+    planned = [call("write_workflow", workflow=lifecycle(steps=steps)), DONE, DONE]
+    report = run_test_pipeline(
+        config(
+            items_api,
+            tmp_path,
+            [*planned, *endless()],
+            [verdict("TEST_BUG"), DONE],
+            budget=Budget(max_fix_attempts=3),
+        )
+    )
+    assert report.run.tests == {TEST_ID: "UNRESOLVED"}
+    assert report.run.stop_reason is StopReason.COMPLETED
+    assert report.results.tests[0].fix_attempts == 1, "a stuck fix gets no second go"
+    assert report.results.tasks_stopped == ["planner, item_lifecycle: stopped at 20 calls"]
+    # 3 calls to plan, 2 for the one verdict, and 20 for the stuck fix.
+    assert report.run.state.steps_used == 3 + 2 + 20
+
+
+def test_a_stuck_reviewer_leaves_the_test_unresolved_and_the_run_goes_on(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED, endless()))
+    assert report.run.tests == {TEST_ID: "UNRESOLVED"}
+    assert report.run.stop_reason is StopReason.COMPLETED
+    assert report.results.tasks_stopped == ["reviewer, item_lifecycle: stopped at 20 calls"]
+    assert (tmp_path / "reports" / "report.md").is_file()
+    assert "stopped at 20 calls" in (tmp_path / "reports" / "report.md").read_text()
+
+
+def test_a_stuck_planner_keeps_what_it_wrote_and_reports_the_rest(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    written = call("write_workflow", workflow=lifecycle())
+    report = run_test_pipeline(config(items_api, tmp_path, [written, *endless()]))
+    # This spec has 4 operations, so the limit is 20 + 3 x 4.
+    assert report.results.tasks_stopped == ["planner, run: stopped at 32 calls"]
+    assert report.run.state.steps_used == 32
+    assert [test.workflow_id for test in report.results.tests] == ["item_lifecycle"]
+    assert report.results.uncovered_operations == ["login"]
+    assert report.results.tests[0].status.value == "passed"
+
+
+def test_a_planner_that_is_stuck_and_wrote_nothing_stops_the_run(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    report = run_test_pipeline(config(items_api, tmp_path, endless()))
+    assert report.run.stop_reason is StopReason.INVALID_OUTPUT
+
+
+def test_a_stuck_report_leaves_the_failure_labeled_with_no_file(
+    items_api: ItemsApi, tmp_path: Path
+) -> None:
+    items_api.broken_get = True
+    report = run_test_pipeline(
+        config(items_api, tmp_path, PLANNED, [verdict("API_BUG"), DONE, *endless()])
+    )
+    assert report.results.tests[0].verdict.label.value == "API_BUG"
+    assert report.results.tests[0].verdict.action.kind.value == "none"
+    assert report.results.tasks_stopped == ["reviewer, run: stopped at 20 calls"]
+
+
+def test_cli_shows_a_task_that_hit_its_limit(
+    items_api: ItemsApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Callable[..., None],
+) -> None:
+    items_api.broken_get = True
+    (tmp_path / "s.json").write_text(json.dumps(spec()))
+    scripted(planner=PLANNED, reviewer=endless())
+    result = invoke(tmp_path, monkeypatch, ["test", "s.json", "--base-url", items_api.url])
+    assert "LIMIT       reviewer, item_lifecycle: stopped at 20 calls" in result.output
+
+
+def test_normal_tasks_never_see_the_limit(items_api: ItemsApi, tmp_path: Path) -> None:
+    report = run_test_pipeline(config(items_api, tmp_path, PLANNED))
+    assert report.results.tasks_stopped == []

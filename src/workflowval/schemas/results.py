@@ -146,6 +146,10 @@ class RunResults(Strict):
     stop_detail: str | None = None
     tests: list[TestResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
+    tasks_stopped: list[str] = Field(
+        default_factory=list,
+        description="Tasks that hit their call limit, so may be incomplete",
+    )
     uncovered_operations: list[str] = Field(
         default_factory=list, description="Spec operations no workflow calls"
     )

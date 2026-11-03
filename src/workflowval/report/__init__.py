@@ -98,6 +98,10 @@ def render_report(run: RunResults) -> str:
     lines += _section(
         "Operations no workflow calls", [f"- `{op}`" for op in run.uncovered_operations]
     )
+    lines += _section(
+        "Tasks stopped at their call limit, so their work may be incomplete",
+        [f"- {task}" for task in run.tasks_stopped],
+    )
     return redact_text("\n".join(lines).rstrip() + "\n")
 
 

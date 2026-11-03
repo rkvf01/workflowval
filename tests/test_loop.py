@@ -568,3 +568,30 @@ def test_identical_scripts_give_identical_results(tmp_path: Path) -> None:
     first, second = once(tmp_path / "a"), once(tmp_path / "b")
     assert first.tests == second.tests
     assert first.state == second.state
+
+
+def test_a_task_stops_at_its_call_limit_and_later_steps_still_run(tmp_path: Path) -> None:
+    from workflowval.loop import TASK_CALL_LIMIT
+
+    stuck = Role("stuck", "p", (ECHO,), FakeModel([call("echo", value=1) for _ in range(50)]))
+    finishing = Role("fine", "p", (ECHO,), FakeModel([DONE]))
+    pipeline = Pipeline((RoleStep("a", stuck, "go"), RoleStep("b", finishing, "go")))
+    result = run(pipeline, Budget(), workdir=tmp_path)
+    assert result.stop_reason is StopReason.COMPLETED
+    assert result.state.steps_used == TASK_CALL_LIMIT + 1
+    assert result.state.tasks_stopped == [f"stuck, run: stopped at {TASK_CALL_LIMIT} calls"]
+    assert result.state.completed_steps == ["a", "b"]
+
+
+def test_the_overall_step_limit_still_wins_over_a_higher_task_limit(tmp_path: Path) -> None:
+    stuck = Role("stuck", "p", (ECHO,), FakeModel([call("echo", value=1) for _ in range(50)]))
+    result = run(Pipeline((RoleStep("a", stuck, "go"),)), Budget(max_steps=5), workdir=tmp_path)
+    assert result.stop_reason is StopReason.MAX_STEPS
+    assert result.state.tasks_stopped == []
+
+
+def test_the_task_limit_is_recorded_in_the_trace(tmp_path: Path) -> None:
+    stuck = Role("stuck", "p", (ECHO,), FakeModel([call("echo", value=1) for _ in range(50)]))
+    run(Pipeline((RoleStep("a", stuck, "go"),)), Budget(), workdir=tmp_path)
+    trace = (tmp_path / ".workflowval" / "trace.jsonl").read_text()
+    assert '"kind": "task_limit"' in trace

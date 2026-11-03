@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from workflowval.schemas import Label, RunState, RunStats, save_json
 from workflowval.tools import ROLE_TOOLS, TOOLS, Tool, ToolContext, ToolError
 
 MAX_INVALID_RETRIES = 2
+# Measured on 24 runs: fix and review tasks normally use under 12 calls, and stuck ones over 60.
+TASK_CALL_LIMIT = 20
 PASSED = "passed"
 
 
@@ -152,6 +155,10 @@ class RunResult:
         return f"{line}\n{self.suggestion}" if self.suggestion else line
 
 
+class TaskLimitReached(Exception):
+    """One task used all its model calls. Only that task stops, and the run carries on."""
+
+
 class StopRun(Exception):
     """Raised by steps and the loop to end a run with a stated reason."""
 
@@ -195,12 +202,22 @@ class RunContext:
         save_json(self.state, self.state_path)
         save_json(self.stats.snapshot(), self.stats_path)
 
-    def run_role(self, role: Role, instruction: str, workflow_id: str | None = None) -> str:
+    def run_role(
+        self,
+        role: Role,
+        instruction: str,
+        workflow_id: str | None = None,
+        *,
+        max_calls: int = TASK_CALL_LIMIT,
+    ) -> str:
         """Talk to a role until it answers without tool calls, and return that answer.
 
         With `workflow_id`, every call counts toward that workflow in the stats. Without it, each
-        tool call counts toward the workflow its arguments name, or else toward the run.
+        tool call counts toward the workflow its arguments name, or else toward the run. A task that
+        makes `max_calls` model calls without finishing raises TaskLimitReached, so that one stuck
+        task can't spend a whole run's budget.
         """
+        calls = 0
         messages = [
             Message("system", role.prompt),
             Message("user", instruction),
@@ -209,6 +226,14 @@ class RunContext:
         specs = [tool.spec() for tool in role.tools]
         invalid_streak = 0
         while True:
+            if calls >= max_calls:
+                self.state.tasks_stopped.append(
+                    f"{role.name}, {workflow_id or 'run'}: stopped at {max_calls} calls"
+                )
+                self.tracer.event("task_limit", role=role.name, workflow=workflow_id, calls=calls)
+                self.checkpoint()
+                raise TaskLimitReached(f"{role.name} used all {max_calls} calls for one task")
+            calls += 1
             reply = self._call_model(role, messages, specs, workflow_id)
             self.stats.record_reply(
                 workflow_id, reply.tool_calls, {*TOOLS, *tools}, role.name, reply.usage.cost_usd
@@ -360,11 +385,17 @@ def _run_fix_loop(ctx: RunContext, step: FixLoop) -> None:
         if to_fix and stalled >= budget.no_progress_limit:
             raise StopRun(StopReason.NO_PROGRESS, f"no progress in {stalled} iterations")
 
+        retry: list[TestOutcome] = []
         for failure in to_fix:
             state.fix_attempts[failure.test_id] = state.fix_attempts.get(failure.test_id, 0) + 1
-            step.fix(ctx, failure)
+            try:
+                step.fix(ctx, failure)
+                retry.append(failure)
+            except TaskLimitReached:
+                # A fix that couldn't finish isn't trustworthy, so it doesn't get another go.
+                _close(ctx, failure.test_id, Label.UNRESOLVED.value)
             ctx.checkpoint()
-        to_run = frozenset(failure.test_id for failure in to_fix)
+        to_run = frozenset(failure.test_id for failure in retry)
 
 
 def _run_step(ctx: RunContext, step: Step) -> None:
@@ -397,7 +428,9 @@ def run(
     ctx.checkpoint()
     try:
         for step in pipeline.steps:
-            _run_step(ctx, step)
+            # A stuck task ends that step's work, and later steps can still run.
+            with contextlib.suppress(TaskLimitReached):
+                _run_step(ctx, step)
             ctx.state.completed_steps.append(step.name)
             ctx.checkpoint()
     except StopRun as stop:

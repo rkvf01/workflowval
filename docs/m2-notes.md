@@ -67,6 +67,11 @@ and the patches from the trial round applied to the original spec and left it va
   leaves a valid spec, and makes the observed response fit, without breaking anything else in it.
 - **Reports:** `reports/report.md`, `junit.xml` and `results.json`. `--report` picks another folder. Failures
   on assumed rules and open conflicts have their own sections.
+- **Call limits per task:** a fix or Reviewer task stops at 20 model calls, and a planning task at 20 plus
+  3 per operation. On 24 benchmark runs, normal fix and Reviewer tasks used 11 calls at most, and stuck ones
+  over 60. Only the stuck task stops: a fix ends `UNRESOLVED`, a plan keeps what it wrote, and the run
+  carries on. The run prints `LIMIT` for each one. `--max-steps` still caps the whole run. These numbers
+  come from one 8-operation API, so larger APIs should check them.
 - **`drift`:** re-runs saved tests and rules only on spec mismatches. It needs `workflowval test` to have
   run first, and it doesn't label or fix failing tests.
 

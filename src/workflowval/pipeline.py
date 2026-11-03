@@ -559,6 +559,7 @@ def _build_results(session: _Session, run_result: RunResult) -> RunResults:
         stop_detail=run_result.detail or None,
         tests=tests,
         findings=session.findings,
+        tasks_stopped=state.tasks_stopped,
         input_tokens=state.input_tokens,
         output_tokens=state.output_tokens,
         cost_usd=state.cost_usd,
