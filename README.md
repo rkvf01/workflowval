@@ -6,15 +6,25 @@ pytest tests against a live API, and triages every failure as a test bug, an API
 **Status: M4 in progress.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`.
 Requirements are in `workflowreq.md`, decisions in `docs/m0-review.md`, and changes and known limits in
 `docs/m1-notes.md`, `docs/m2-notes.md` and `docs/m3-notes.md`. `docs/drift-study.md` compares three
-implementations of one API.
+implementations of one API, and `docs/model-comparison.md` compares two models.
 
 ## Quickstart
+
+It isn't on PyPI yet, so install from a clone. It needs Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
+
+```
+git clone <this repo> && cd workflowval
+uv sync
+source .venv/bin/activate
+```
+
+Then, from the folder where you want the tests written:
 
 ```
 export OPENROUTER_API_KEY=...
 export WORKFLOWVAL_MODEL=openrouter/<vendor>/<model>
 workflowval inspect openapi.json
-workflowval test openapi.json --base-url http://localhost:8000
+workflowval test openapi.json --base-url http://localhost:8000 --max-cost-usd 2
 workflowval run tests/wf
 ```
 
@@ -23,6 +33,36 @@ plus `report.md`, `junit.xml`, bug reports and spec patches in `reports/`.
 If the API needs a login, pass `--auth auth.json` to both `test` and `run`, and set the env vars that
 file names. In a login config, a field like `user.email` nests the login body. See `benchmarks/targets.md` for
 the demo targets.
+
+## How it works
+
+`workflowval test` runs these steps, and saves its place after each one:
+
+1. **Plan.** The Planner reads the spec and any docs, and writes one workflow file per multi-step scenario,
+   each with the result it expects.
+2. **Review the plan.** The Reviewer looks for what the plan missed, as a user of the API would, and the
+   Planner adds workflows.
+3. **Write tests.** Code, not a model, renders each workflow into a pytest file, so this step is free and
+   repeatable.
+4. **Run and label.** The tests run against the live API. Only a result that doesn't match what the workflow
+   expected goes to the Reviewer, which labels it `TEST_BUG`, `API_BUG`, `SPEC_DRIFT`, `CONFLICT` or
+   `UNRESOLVED`.
+5. **Fix test bugs only.** The Planner corrects a wrong workflow and the Writer corrects test code. A real
+   failure is never changed to make it pass. It stays as a labeled expected failure.
+6. **Review the results.** The Reviewer sees the confirmed failures and asks for new workflows, including
+   ones that get past a known bug.
+7. **Report.** Bug reports, spec patches, `report.md` and `junit.xml` go in `reports/`.
+
+| Part | Where |
+| --- | --- |
+| Commands | `src/workflowval/cli.py`, `pipeline.py` |
+| Agent loop, budgets and stop rules | `src/workflowval/loop/` |
+| Model adapter, the only code that imports a provider library | `src/workflowval/models/` |
+| Tools the roles may call, limited per role | `src/workflowval/tools/` |
+| Data formats | `src/workflowval/schemas/` |
+| Spec reading and response checks | `src/workflowval/spec/` |
+| Test rendering | `src/workflowval/gen/` |
+| Role prompts | `src/workflowval/prompts/` |
 
 ## What needs a model
 
@@ -65,7 +105,26 @@ which affects how independent this score is.
 | CONFLICT reports | 0 (0 to 0) | 1 |
 | Cost per round, USD | 0.31 (0.30 to 0.35) | reported only |
 
-Label accuracy and the conflict report still miss their targets.
+Label accuracy and the conflict report still miss their targets on this model. A second model met them on
+the medians, at about 28 times the cost and with less steady detection: see `docs/model-comparison.md`.
+
+## Known limits
+
+- **Results vary by model and run,** since models choose the workflows and labels. Three rounds is a small sample.
+- **Labels are the weak spot.** About a quarter of detected bugs got the wrong label on both models tested. Check
+  a label before acting on it.
+- **A test stops at its first failure.** A bug in an early step can hide later bugs from every test that goes
+  through that step. This is deliberate: the failure stays a result, and getting further is the job of another test.
+- **Finding a conflict isn't reliable** on the low-cost model, which wrote no CONFLICT reports in the benchmark.
+- **The fix loop can be inconsistent.** On the same kind of edge case, it may rewrite what some tests expect and not
+  others. Rewrites that change what a test checks are printed as `CHANGED`, so review them.
+- **Edge cases get missed,** and a `204` can raise a false alarm. See `docs/drift-study.md`.
+- **Generated tests aren't sandboxed.** They run on your machine with your permissions, so use only specs and docs
+  you trust.
+- **The cost cap can go slightly over,** since it judges by the dearest call so far.
+- **A run resumes only after being killed.** One that stopped on a model error, a step limit or a cost limit doesn't
+  pick up where it stopped. Running it again starts a new run, which reuses a finished plan for the same spec.
+- **The benchmark isn't fully independent,** because of who wrote the seeded app. See `benchmarks/seeded/README.md`.
 
 ## Safety and CI
 
