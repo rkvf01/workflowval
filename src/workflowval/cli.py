@@ -43,7 +43,9 @@ Flags (see each command's --help for the ones it takes):
   --max-fix-attempts N        Fixes per test before UNRESOLVED (default 3)
   --max-iterations N          Test-run passes per run (default 10)
   --max-steps N               Model calls per run (default 200)
+  --max-cost-usd N            Stop before a model call could pass this cost (default: no limit)
   --read-only                 Block POST, PUT, PATCH and DELETE
+  --no-redact                 Keep response bodies exact, for local APIs only
   --allow-host HOST           Host that may be called (default: the base URL's host)
   --allow-remote              Allow hosts other than localhost
   --yes                       Skip the prompt before writes to a non-local host
@@ -80,7 +82,15 @@ Iterations = Annotated[
     int, typer.Option("--max-iterations", min=1, help="Test-run passes per run.")
 ]
 Steps = Annotated[int, typer.Option("--max-steps", min=1, help="Model calls per run.")]
+MaxCost = Annotated[
+    float | None,
+    typer.Option("--max-cost-usd", min=0.0, help="Stop before a model call could pass this cost."),
+]
 ReadOnly = Annotated[bool, typer.Option("--read-only", help="Block POST, PUT, PATCH and DELETE.")]
+NoRedact = Annotated[
+    bool,
+    typer.Option("--no-redact", help="Keep response bodies exact. Local APIs only."),
+]
 AllowHost = Annotated[
     list[str] | None,
     typer.Option("--allow-host", help="Host that may be called. Default: the base URL's host."),
@@ -232,6 +242,21 @@ def _build_models(
     return models
 
 
+def _check_no_redact(no_redact: bool, base_url: str | None) -> None:
+    """Exact responses may hold real secrets, so they are kept only for a local API."""
+    if not no_redact:
+        return
+    if base_url is None:
+        raise typer.BadParameter("--no-redact needs --base-url, so the host can be checked")
+    if urlparse(base_url).hostname not in LOCAL_HOSTS:
+        raise typer.BadParameter("--no-redact works only with a local API")
+
+
+def _check_cost_limit(max_cost_usd: float | None, tracked: bool) -> None:
+    if max_cost_usd is not None and not tracked:
+        raise typer.BadParameter("--max-cost-usd needs cost tracking, which is turned off")
+
+
 def _cost_tracked(no_cost_tracking: bool) -> bool:
     return not no_cost_tracking and os.environ.get("WORKFLOWVAL_COST_TRACKING", "") != "off"
 
@@ -306,7 +331,9 @@ def test_command(
     max_fix_attempts: FixAttempts = 3,
     max_iterations: Iterations = 10,
     max_steps: Steps = 200,
+    max_cost_usd: MaxCost = None,
     read_only: ReadOnly = False,
+    no_redact: NoRedact = False,
     allow_host: AllowHost = None,
     allow_remote: AllowRemote = False,
     yes: Yes = False,
@@ -321,6 +348,7 @@ def test_command(
 ) -> None:
     """Plan workflows, write tests, run them against the API and triage every failure."""
     choice = resolve_models(model, role_model)
+    _check_no_redact(no_redact, base_url)
     check_host(
         base_url,
         allow_host,
@@ -332,6 +360,7 @@ def test_command(
     auth_config = _load_auth(auth)
     _check_auth_env(auth_config)
     tracked = _cost_tracked(no_cost_tracking)
+    _check_cost_limit(max_cost_usd, tracked)
     outcome = _run_pipeline(
         TestConfig(
             spec_source=spec,
@@ -343,11 +372,13 @@ def test_command(
                 max_fix_attempts=max_fix_attempts,
                 max_iterations=max_iterations,
                 max_steps=max_steps,
+                max_cost_usd=max_cost_usd,
             ),
             docs_dir=docs,
             auth=auth_config,
             reports_dir=report,
             read_only=read_only,
+            no_redact=no_redact,
             allowed_hosts=tuple(allow_host or ()),
             plan_only=plan_only,
             verbose=verbose,
@@ -370,6 +401,7 @@ def plan_command(
     role_model: RoleModel = None,
     max_review_rounds: ReviewRounds = 2,
     max_steps: Steps = 200,
+    max_cost_usd: MaxCost = None,
     verbose: Verbose = False,
     seed: Seed = None,
     temperature: Temperature = None,
@@ -378,13 +410,18 @@ def plan_command(
     """Write reviewable workflows/<id>.json files and stop."""
     choice = resolve_models(model, role_model)
     tracked = _cost_tracked(no_cost_tracking)
+    _check_cost_limit(max_cost_usd, tracked)
     outcome = _run_pipeline(
         TestConfig(
             spec_source=spec,
             base_url="http://localhost",
             workdir=Path.cwd(),
             models=_build_models(choice, seed, temperature, tracked),
-            budget=Budget(max_review_rounds=max_review_rounds, max_steps=max_steps),
+            budget=Budget(
+                max_review_rounds=max_review_rounds,
+                max_steps=max_steps,
+                max_cost_usd=max_cost_usd,
+            ),
             docs_dir=docs,
             plan_only=True,
             verbose=verbose,
@@ -405,6 +442,7 @@ def run_command(
     auth: Auth = None,
     report: Report = None,
     read_only: ReadOnly = False,
+    no_redact: NoRedact = False,
     allow_host: AllowHost = None,
     allow_remote: AllowRemote = False,
     yes: Yes = False,
@@ -416,6 +454,7 @@ def run_command(
     """Re-run existing tests without calling a model."""
     if not tests.is_dir():
         raise typer.BadParameter(f"no such folder: {tests}")
+    _check_no_redact(no_redact, base_url)
     if base_url:
         check_host(
             base_url, allow_host, allow_remote=allow_remote, yes=yes or ci, read_only=read_only
@@ -427,6 +466,7 @@ def run_command(
         base_url=base_url,
         env_names=auth_env_names(auth_config),
         read_only=read_only,
+        no_redact=no_redact,
         allowed_hosts=allow_host or (),
     )
     if not outcomes:
@@ -466,7 +506,9 @@ def drift_command(
     model: ModelOpt = None,
     role_model: RoleModel = None,
     max_steps: Steps = 200,
+    max_cost_usd: MaxCost = None,
     read_only: ReadOnly = False,
+    no_redact: NoRedact = False,
     allow_host: AllowHost = None,
     allow_remote: AllowRemote = False,
     yes: Yes = False,
@@ -478,6 +520,7 @@ def drift_command(
 ) -> None:
     """Check only whether the live API still matches its spec."""
     choice = resolve_models(model, role_model)
+    _check_no_redact(no_redact, base_url)
     check_host(
         base_url,
         allow_host,
@@ -488,6 +531,7 @@ def drift_command(
     )
     auth_config = _load_auth(auth)
     _check_auth_env(auth_config)
+    _check_cost_limit(max_cost_usd, _cost_tracked(False))
     outcome = _run_with(
         run_drift_pipeline,
         TestConfig(
@@ -495,10 +539,11 @@ def drift_command(
             base_url=base_url,
             workdir=Path.cwd(),
             models=_build_models(choice, seed, temperature, _cost_tracked(False)),
-            budget=Budget(max_steps=max_steps),
+            budget=Budget(max_steps=max_steps, max_cost_usd=max_cost_usd),
             auth=auth_config,
             reports_dir=report,
             read_only=read_only,
+            no_redact=no_redact,
             allowed_hosts=tuple(allow_host or ()),
             verbose=verbose,
             cost_tracked=_cost_tracked(False),

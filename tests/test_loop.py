@@ -457,6 +457,46 @@ def test_a_provider_failure_stops_the_run_with_a_reason(tmp_path: Path) -> None:
     assert trace(tmp_path)[1]["kind"] == "model_error"
 
 
+def costing(*costs: float | None) -> Role:
+    replies = [
+        Reply(tool_calls=call("echo", value=1).tool_calls, usage=Usage(1, 1, cost))
+        for cost in costs
+    ]
+    return role(replies)
+
+
+def test_the_cost_limit_stops_a_run_before_a_call_could_pass_it(tmp_path: Path) -> None:
+    worker = costing(0.4, 0.4, 0.4, 0.4)
+    result = go([RoleStep("s", worker, "x")], tmp_path, max_cost_usd=1.0)
+    assert result.stop_reason is StopReason.MAX_COST
+    assert result.state.steps_used == 2
+    assert result.state.cost_usd == pytest.approx(0.8)
+    assert "$1.00" in result.detail
+
+
+def test_a_run_under_the_cost_limit_finishes(tmp_path: Path) -> None:
+    worker = role([Reply(text="done", usage=Usage(1, 1, 0.1))])
+    result = go([RoleStep("s", worker, "x")], tmp_path, max_cost_usd=1.0)
+    assert result.stop_reason is StopReason.COMPLETED
+
+
+def test_no_limit_means_cost_never_stops_a_run(tmp_path: Path) -> None:
+    worker = role(
+        [
+            Reply(tool_calls=call("echo", value=1).tool_calls, usage=Usage(1, 1, 50.0)),
+            Reply(text="done", usage=Usage(1, 1, 50.0)),
+        ]
+    )
+    assert go([RoleStep("s", worker, "x")], tmp_path).stop_reason is StopReason.COMPLETED
+
+
+def test_an_unpriced_call_stops_a_run_that_has_a_cost_limit(tmp_path: Path) -> None:
+    worker = costing(None, 0.1)
+    result = go([RoleStep("s", worker, "x")], tmp_path, max_cost_usd=1.0)
+    assert result.stop_reason is StopReason.MAX_COST
+    assert "no known price" in result.detail
+
+
 def test_usage_is_summed_and_unpriced_calls_are_reported(tmp_path: Path) -> None:
     worker = role(
         [

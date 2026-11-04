@@ -11,6 +11,8 @@ from openapi_core import Config, OpenAPI
 from openapi_core.exceptions import OpenAPIError
 from openapi_core.testing import MockRequest, MockResponse
 
+from workflowval.redact import MASK
+
 _SERVER = "http://workflowval.invalid"
 _MAX_MESSAGE = 300
 
@@ -68,7 +70,9 @@ class ResponseChecker:
         if not isinstance(template, str) or not isinstance(status, int) or status >= 500:
             return []
         body = str(call.get("raw_body") or "").encode()
-        return self.check(str(call["method"]), template, status, call.get("content_type"), body)
+        found = self.check(str(call["method"]), template, status, call.get("content_type"), body)
+        # A value that was hidden can't be judged: the mask itself would break a format rule.
+        return [mismatch for mismatch in found if MASK not in mismatch.message]
 
     def __init__(self, spec: dict[str, Any], *, validate_spec: bool = False) -> None:
         config = None if validate_spec else Config(spec_validator_cls=None)

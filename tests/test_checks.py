@@ -298,3 +298,47 @@ def test_one_schema_problem_in_a_list_and_under_another_status_is_one_group(
 
 def test_an_unlisted_status_is_not_called_likely_drift() -> None:
     assert "SPEC_DRIFT" not in classify(400, ["status 400 isn't in the spec"])
+
+
+def test_a_hidden_value_is_not_judged_by_the_spec_check() -> None:
+    schema = {"type": "object", "properties": {"email": {"type": "string", "format": "email"}}}
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {
+            "/u": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "description": "ok",
+                            "content": {"application/json": {"schema": schema}},
+                        }
+                    }
+                }
+            }
+        },
+    }
+    checker = ResponseChecker(spec)
+    call_with = {
+        "method": "GET",
+        "template": "/u",
+        "status": 200,
+        "content_type": "application/json",
+    }
+    hidden = {**call_with, "raw_body": '{"email": "[REDACTED]"}'}
+    wrong = {**call_with, "raw_body": '{"email": "not-an-email"}'}
+    assert checker.check_call(hidden) == []
+    assert checker.check_call(wrong) != []
+
+
+def test_no_redact_keeps_only_the_response_body_exact() -> None:
+    from workflowval.testrun import _redacted
+
+    result = {
+        "failing_assertion": '{"token": "abc123def456"}',
+        "calls": [{"raw_body": '{"token":"abc123def456"}'}],
+    }
+    kept = _redacted(result, no_redact=True)
+    assert kept["calls"][0]["raw_body"] == '{"token":"abc123def456"}'
+    assert "abc123def456" not in kept["failing_assertion"]
+    assert "abc123def456" not in _redacted(result, no_redact=False)["calls"][0]["raw_body"]

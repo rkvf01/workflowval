@@ -75,6 +75,6 @@ them with the "review on" column, not the final one.
 ## Known limits
 
 - **Runs are slower and use more steps.** A review-on round took 15 to 20 minutes, with 28 to 55 tests per run.
-- **Not retried:** a rate limit from a model provider still ends the run.
+- **Rate limits:** in M3, a rate limit from a model provider ended the run. M4 added retries.
 - **Not explained:** one model sent invalid tool calls during planning, and its runs stopped.
 - **The benchmark scores a failed run as 0,** rather than flagging it.

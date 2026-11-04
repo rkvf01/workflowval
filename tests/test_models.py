@@ -20,6 +20,7 @@ from workflowval.models import (
     Usage,
     call,
 )
+from workflowval.models.litellm_adapter import RETRY_DELAYS
 
 SPEC = ToolSpec("read_spec", "Read it.", {"type": "object", "properties": {}})
 
@@ -185,6 +186,62 @@ def test_provider_errors_are_wrapped_and_redacted(monkeypatch: pytest.MonkeyPatc
     assert "RuntimeError" in str(caught.value)
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__
+
+
+class Provider(Exception):
+    def __init__(self, status_code: int | None = None) -> None:
+        super().__init__("provider said no")
+        if status_code is not None:
+            self.status_code = status_code
+
+
+class RateLimitError(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    "error", [Provider(408), Provider(429), Provider(503), RateLimitError("slow down")]
+)
+def test_a_temporary_provider_error_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    replies: list[Any] = [error, error, wire_response("back")]
+
+    def answer(**_: Any) -> Any:
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(litellm, "completion", answer)
+    waits: list[float] = []
+    assert LiteLLMModel("a/b", sleep=waits.append).complete([], []).text == "back"
+    assert waits == [2.0, 4.0]
+
+
+def test_a_lasting_rate_limit_ends_with_a_model_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(**_: Any) -> Any:
+        raise Provider(429)
+
+    monkeypatch.setattr(litellm, "completion", fail)
+    waits: list[float] = []
+    with pytest.raises(ModelError, match="Provider"):
+        LiteLLMModel("a/b", sleep=waits.append).complete([], [])
+    assert waits == list(RETRY_DELAYS)
+
+
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_a_request_the_provider_rejects_is_not_tried_again(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    def fail(**_: Any) -> Any:
+        raise Provider(status)
+
+    monkeypatch.setattr(litellm, "completion", fail)
+    waits: list[float] = []
+    with pytest.raises(ModelError):
+        LiteLLMModel("a/b", sleep=waits.append).complete([], [])
+    assert waits == []
 
 
 def test_adapter_handles_real_litellm_objects_offline() -> None:

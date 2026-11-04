@@ -4,7 +4,7 @@ An orders API with 10 planted defects and one planted spec-docs conflict, used t
 The spec and `labels.json` are ground truth: don't edit them to change a score.
 
 **Who wrote this:** the same coding agent that builds workflowval wrote this app, following the
-defect list in `workflowreq.md`, and the project owner chose that. So these scores are less
+defect list in `docs/requirements.md`, and the project owner chose that. So these scores are less
 independent than a benchmark written by someone else. As safeguards, the tool never sees this
 folder's labels or source, and prompts aren't tuned around specific seeded bugs.
 
