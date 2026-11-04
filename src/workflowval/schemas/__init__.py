@@ -16,7 +16,14 @@ from workflowval.schemas.results import (
     TestStatus,
     Verdict,
 )
-from workflowval.schemas.review import Answer, Decision, MissingJourney, Review, WorkflowFix
+from workflowval.schemas.review import (
+    Answer,
+    Decision,
+    MissingJourney,
+    Review,
+    ReviewLog,
+    WorkflowFix,
+)
 from workflowval.schemas.state import RunState
 from workflowval.schemas.stats import CallCounts, RunStats, StatsTotal
 from workflowval.schemas.workflow import (
@@ -52,6 +59,7 @@ __all__ = [
     "LoginAuth",
     "MissingJourney",
     "Review",
+    "ReviewLog",
     "RunResults",
     "RunState",
     "RunStats",

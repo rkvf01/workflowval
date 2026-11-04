@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from workflowval.loop import Budget
 from workflowval.models import FakeModel, Reply, call
 from workflowval.pipeline import TestConfig, run_test_pipeline
 from workflowval.schemas import Label, RunResults
@@ -144,6 +145,7 @@ def test_a_call_with_no_template_is_skipped(checker: ResponseChecker) -> None:
         (500, ["x"], "likely an API_BUG"),
         (503, [], "likely an API_BUG"),
         (200, ["$.a: wrong"], "likely SPEC_DRIFT: $.a: wrong"),
+        (400, ["status 400 isn't in the spec"], "status 400 isn't in the spec"),
         (404, [], "no automatic signal"),
         (None, [], "no automatic signal"),
     ],
@@ -191,6 +193,7 @@ def _config(tmp_path: Path, url: str, reviewer: list[Reply]) -> TestConfig:
             "reviewer": FakeModel(reviewer),
             "writer": FakeModel([]),
         },
+        budget=Budget(max_review_rounds=0),
     )
 
 
@@ -291,3 +294,7 @@ def test_one_schema_problem_in_a_list_and_under_another_status_is_one_group(
     assert len(groups) == 2, [group.key for group in groups]
     for group in groups:
         assert group.operations == {"createOrder", "getOrder", "listOrders"}
+
+
+def test_an_unlisted_status_is_not_called_likely_drift() -> None:
+    assert "SPEC_DRIFT" not in classify(400, ["status 400 isn't in the spec"])

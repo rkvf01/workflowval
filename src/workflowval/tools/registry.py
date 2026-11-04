@@ -30,8 +30,10 @@ from workflowval.schemas import (
     Answer,
     Basis,
     Confidence,
+    Decision,
     Label,
     Review,
+    ReviewLog,
     Source,
     Workflow,
     atomic_write_text,
@@ -344,6 +346,11 @@ def write_workflow(args: WriteWorkflowArgs, context: ToolContext) -> str:
             raise ToolError(f"{path.name} exists but can't be read; left unchanged") from exc
         if existing.locked:
             raise ToolError(f"{path.name} is locked by the user and can't be changed")
+        if context.new_workflows_only:
+            raise ToolError(
+                f"{path.name} already exists, and tests that have run stay as they are. "
+                "Write a new workflow with a new id."
+            )
         changes = _expectation_changes(existing, workflow)
     atomic_write_text(path, workflow.model_dump_json(indent=2, exclude_none=True) + "\n")
     if changes:
@@ -354,14 +361,54 @@ def write_workflow(args: WriteWorkflowArgs, context: ToolContext) -> str:
     return f"wrote workflows/{workflow.id}.json"
 
 
+def _review_path(context: ToolContext) -> Path:
+    return context.workdir / "review.json"
+
+
+def _read_review_log(context: ToolContext) -> ReviewLog:
+    path = _review_path(context)
+    if not path.is_file():
+        return ReviewLog()
+    return ReviewLog.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def _save_review_log(context: ToolContext, log: ReviewLog) -> None:
+    atomic_write_text(
+        _review_path(context), log.model_dump_json(indent=2, exclude_none=True) + "\n"
+    )
+
+
 def write_review(args: WriteReviewArgs, context: ToolContext) -> str:
     """Record review.json: workflows to fix and user journeys that are missing."""
-    return _stub("M3")(args, context)
+    log = _read_review_log(context)
+    known = {item.id for review in log.rounds for item in review.items()}
+    if repeated := sorted(known & {item.id for item in args.review.items()}):
+        raise ToolError(f"these item ids were used in an earlier round: {repeated}")
+    review = args.review.model_copy(
+        update={"round": len(log.rounds) + 1, "after_tests": context.new_workflows_only}
+    )
+    if context.new_workflows_only:
+        # A failure is a result, so a test that has run never changes because of one.
+        refusal = Answer(decision=Decision.REJECTED, reason="Tests that have run stay as they are.")
+        fixes = [fix.model_copy(update={"answer": refusal}) for fix in review.fixes]
+        review = review.model_copy(update={"fixes": fixes})
+    log.rounds.append(review)
+    _save_review_log(context, log)
+    return f"recorded review round {review.round}: {len(review.items())} items"
 
 
 def answer_review(args: AnswerReviewArgs, context: ToolContext) -> str:
     """Answer one review.json item: accept it naming a workflow, or reject it with a reason."""
-    return _stub("M3")(args, context)
+    log = _read_review_log(context)
+    item = log.item(args.item_id)
+    if item is None:
+        raise ToolError(f"no review item {args.item_id!r}. Open items: {log.unanswered()}")
+    workflow_id = args.answer.workflow_id
+    if workflow_id and not (_workflows_dir(context) / f"{workflow_id}.json").is_file():
+        raise ToolError(f"no workflow {workflow_id!r}: write it first, then accept this item")
+    item.answer = args.answer
+    _save_review_log(context, log)
+    return f"recorded the answer to {args.item_id}"
 
 
 def write_test(args: WriteTestArgs, context: ToolContext) -> str:
@@ -392,7 +439,7 @@ def read_tests(args: ReadTestsArgs, context: ToolContext) -> str:
 
 def run_tests(args: RunTestsArgs, context: ToolContext) -> str:
     """Run the generated tests in a subprocess and record results."""
-    return _stub("M1")(args, context)
+    return _stub("a later release")(args, context)
 
 
 def read_results(args: ReadResultsArgs, context: ToolContext) -> str:
@@ -410,7 +457,7 @@ def read_results(args: ReadResultsArgs, context: ToolContext) -> str:
 
 def http_probe(args: HttpProbeArgs, context: ToolContext) -> str:
     """Send one request to an allowed host to investigate a failure."""
-    return _stub("M3")(args, context)
+    return _stub("a later release")(args, context)
 
 
 def write_verdict(args: WriteVerdictArgs, context: ToolContext) -> str:

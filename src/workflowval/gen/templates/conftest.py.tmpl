@@ -18,6 +18,12 @@ import pytest
 BASE_URL = os.environ.get("WORKFLOWVAL_BASE_URL", __BASE_URL__).rstrip("/")
 AUTH: dict[str, Any] | None = __AUTH__
 TIMEOUT_SECONDS = 30
+READ_ONLY = os.environ.get("WORKFLOWVAL_READ_ONLY") == "1"
+ALLOWED_HOSTS = {
+    httpx.URL(BASE_URL).host,
+    *filter(None, os.environ.get("WORKFLOWVAL_ALLOWED_HOSTS", "").split(",")),
+}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 MASK = "[REDACTED]"
 SECRET_HEADERS = {"authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"}
 if AUTH and AUTH.get("type") == "api_key" and AUTH["location"] == "header":
@@ -102,6 +108,12 @@ class _LoginAuth(httpx.Auth):
             yield request
 
 
+def _guard(request: httpx.Request) -> None:
+    """Refuse any request to a host that isn't allowed, whatever made it."""
+    if request.url.host not in ALLOWED_HOSTS:
+        raise RuntimeError(f"{request.url.host} isn't an allowed host: {sorted(ALLOWED_HOSTS)}")
+
+
 def _record(response: httpx.Response) -> None:
     if _recording and not response.request.extensions.get("workflowval_login"):
         response.read()
@@ -123,7 +135,9 @@ def _make_client(*, authenticated: bool) -> httpx.Client:
         elif kind == "login":
             options["auth"] = _LoginAuth(AUTH)
     client = httpx.Client(
-        timeout=TIMEOUT_SECONDS, event_hooks={"response": [_record]}, **options
+        timeout=TIMEOUT_SECONDS,
+        event_hooks={"request": [_guard], "response": [_record]},
+        **options,
     )
     client.headers["Accept"] = "application/json"
     return client
@@ -151,6 +165,8 @@ class Api:
     ) -> httpx.Response:
         """Send one request. `auth=False` sends it without credentials."""
         global _steps_run
+        if READ_ONLY and method.upper() not in SAFE_METHODS:
+            pytest.skip(f"read-only run: {method} {template} wasn't sent")
         if _recording:
             _steps_run += 1
         url = template
@@ -185,6 +201,8 @@ class Api:
     def cleanup(self, method: str, template: str, **options: Any) -> None:
         """Remove test data. A failure here must not hide the test's own result."""
         global _recording
+        if READ_ONLY and method.upper() not in SAFE_METHODS:
+            return
         _recording = False
         try:
             self.call(method, template, **options)

@@ -1,5 +1,7 @@
 # M2 notes
 
+M3 changed some of this: see `docs/m3-notes.md`, which also has the latest benchmark results.
+
 ## Decisions that change the requirements
 
 | Area | Requirements say | M2 does | Why |
@@ -8,7 +10,7 @@
 | Marking a real failure | Mark the test `xfail` | Code writes `known_issue` in the workflow file, and the generated test excuses only that status or check on that step | Owner's decision: any other failure stays visible, and a fix on the API side never turns a run red |
 | A marked test that starts passing | Not covered | It passes, the run says `LOOKS FIXED`, and the next `workflowval test` removes the mark | Owner's decision |
 | Schema mismatches | "Deterministic checks" before labeling | `workflowval test` checks every response, including those of passing tests | Owner's decision: drift in a field no workflow names would otherwise go unseen |
-| `http_probe` | M2 tool | Still a stub, now due in M3 | Recorded traffic was enough for reports and patches |
+| `http_probe` | M2 tool | Still a stub, for a later release | Recorded traffic was enough for reports and patches |
 | GitHub Actions | JUnit results show in GitHub Actions | JUnit is written, but no workflow runs it | Owner's decision to skip CI |
 
 ## Benchmark results

@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import Field, computed_field, model_validator
 
 from workflowval.schemas._base import Strict
+from workflowval.schemas.review import Review
 from workflowval.schemas.workflow import Basis
 
 
@@ -43,7 +44,7 @@ class TestStatus(StrEnum):
     XPASSED = "xpassed"
 
 
-_OK_STATUSES = frozenset({TestStatus.PASSED, TestStatus.XFAILED})
+_OK_STATUSES = frozenset({TestStatus.PASSED, TestStatus.XFAILED, TestStatus.SKIPPED})
 
 
 class ActionKind(StrEnum):
@@ -146,6 +147,7 @@ class RunResults(Strict):
     stop_detail: str | None = None
     tests: list[TestResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
+    reviews: list[Review] = Field(default_factory=list)
     tasks_stopped: list[str] = Field(
         default_factory=list,
         description="Tasks that hit their call limit, so may be incomplete",
@@ -171,6 +173,25 @@ class RunResults(Strict):
         """True when a test failed in a way nobody has reviewed and marked as expected."""
         return any(t.status not in _OK_STATUSES for t in self.tests)
 
+    def ci_failures(self, *, max_api_bugs: int, max_spec_drift: int) -> list[str]:
+        """Why `--ci` should fail the build. Expected failures still count toward the thresholds."""
+        reasons = []
+        unresolved = sum(
+            t.status not in _OK_STATUSES
+            or (t.verdict is not None and t.verdict.label is Label.UNRESOLVED)
+            for t in self.tests
+        )
+        if unresolved:
+            reasons.append(f"{unresolved} unresolved")
+        counts = self.label_counts
+        if counts.get("API_BUG", 0) > max_api_bugs:
+            reasons.append(f"{counts['API_BUG']} API_BUG, above the limit of {max_api_bugs}")
+        if counts.get("SPEC_DRIFT", 0) > max_spec_drift:
+            reasons.append(
+                f"{counts['SPEC_DRIFT']} SPEC_DRIFT, above the limit of {max_spec_drift}"
+            )
+        return reasons
+
     def summary(self) -> str:
         """One line of counts, keeping expected failures apart from passes."""
         passed = sum(t.status is TestStatus.PASSED for t in self.tests)
@@ -181,7 +202,10 @@ class RunResults(Strict):
             if t.status is TestStatus.XFAILED and t.verdict is not None
         )
         parts += [f"{n} expected to fail ({label})" for label, n in sorted(expected.items())]
-        failed = len(self.tests) - passed - sum(expected.values())
+        skipped = sum(t.status is TestStatus.SKIPPED for t in self.tests)
+        if skipped:
+            parts.append(f"{skipped} skipped")
+        failed = len(self.tests) - passed - skipped - sum(expected.values())
         if failed:
             parts.append(f"{failed} failed")
         confirmed = sum(f.label not in {None, Label.TEST_BUG} for f in self.findings)

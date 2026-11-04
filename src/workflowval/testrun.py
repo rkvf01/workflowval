@@ -46,6 +46,16 @@ class Outcome:
         return self.status == "xfailed"
 
     @property
+    def skipped(self) -> bool:
+        """True when a read-only run didn't send the test's write."""
+        return self.status == "skipped"
+
+    @property
+    def ok(self) -> bool:
+        """True unless the test failed in a way nobody has reviewed."""
+        return self.passed or self.expected or self.skipped
+
+    @property
     def looks_fixed(self) -> bool:
         """True when a test marked as a known issue passed."""
         return self.passed and self.known_issue is not None
@@ -76,6 +86,8 @@ def run_tests(
     base_url: str | None,
     workflow_ids: Collection[str] | None = None,
     env_names: Collection[str] = (),
+    read_only: bool = False,
+    allowed_hosts: Collection[str] = (),
 ) -> list[Outcome]:
     """Run tests and return one outcome per workflow. A test with no result counts as an error."""
     wanted = (
@@ -93,6 +105,10 @@ def run_tests(
         env["WORKFLOWVAL_CAPTURE"] = str(capture)
         if base_url:
             env["WORKFLOWVAL_BASE_URL"] = base_url
+        if read_only:
+            env["WORKFLOWVAL_READ_ONLY"] = "1"
+        if allowed_hosts:
+            env["WORKFLOWVAL_ALLOWED_HOSTS"] = ",".join(allowed_hosts)
         files = [f"test_{workflow_id}.py" for workflow_id in wanted]
         command = [
             sys.executable,

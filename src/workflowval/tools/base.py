@@ -28,6 +28,7 @@ class ToolContext:
     reports_dir: Path | None = None
     raw_spec: dict[str, Any] | None = None
     auth: AuthConfig | None = None
+    new_workflows_only: bool = False
 
 
 @dataclass(frozen=True)

@@ -109,13 +109,15 @@ class FixLoop:
     """Run tests, label failures, fix those labeled TEST_BUG, and re-run the fixed ones.
 
     `execute` gets the ids to run, or None for all. `label` returns one label per failure, and a
-    failure it leaves out becomes UNRESOLVED. `fix` is only ever called for a TEST_BUG.
+    failure it leaves out becomes UNRESOLVED. `fix` is only ever called for a TEST_BUG. `first_run`
+    picks the tests for the first pass, and the loop does nothing if it picks none.
     """
 
     name: str
     execute: Callable[[RunContext, frozenset[str] | None], Sequence[TestOutcome]]
     label: Callable[[RunContext, Sequence[TestOutcome]], Mapping[str, Label]]
     fix: Callable[[RunContext, TestOutcome], None]
+    first_run: Callable[[RunContext], frozenset[str]] | None = None
 
 
 Step = RoleStep | CodeStep | ReviewLoop | FixLoop
@@ -342,7 +344,7 @@ def _close(ctx: RunContext, test_id: str, status: str) -> None:
 
 def _run_fix_loop(ctx: RunContext, step: FixLoop) -> None:
     state, budget = ctx.state, ctx.budget
-    to_run: frozenset[str] | None = None
+    to_run = step.first_run(ctx) if step.first_run is not None else None
     previous: tuple[int, frozenset[tuple[str, str]]] | None = None
     stalled = 0
     while to_run is None or to_run:
@@ -418,16 +420,23 @@ def run(
     verbose: bool = False,
     tool_context: ToolContext | None = None,
     cost_tracked: bool = True,
+    resume: RunState | None = None,
 ) -> RunResult:
-    """Run a pipeline. It always terminates, and the result says which limit stopped it, if any."""
+    """Run a pipeline. It always terminates, and the result says which limit stopped it, if any.
+
+    With `resume`, it carries on from that state, skipping the steps already completed. Call counts
+    in the stats start again, while tokens, cost and steps used carry over.
+    """
     tracer = Tracer(workdir / ".workflowval" / "trace.jsonl", echo=verbose)
-    state = RunState(spec_hash=spec_hash, cost_tracked=cost_tracked)
+    state = resume or RunState(spec_hash=spec_hash, cost_tracked=cost_tracked)
     ctx = RunContext(budget, workdir, tracer, state, tool_context)
     reason, detail = StopReason.COMPLETED, ""
     tracer.event("run_start", spec_hash=spec_hash, steps=[step.name for step in pipeline.steps])
     ctx.checkpoint()
     try:
         for step in pipeline.steps:
+            if step.name in ctx.state.completed_steps:
+                continue
             # A stuck task ends that step's work, and later steps can still run.
             with contextlib.suppress(TaskLimitReached):
                 _run_step(ctx, step)

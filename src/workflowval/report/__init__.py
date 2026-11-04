@@ -8,6 +8,7 @@ from xml.etree import ElementTree as ET
 from workflowval.redact import redact_text
 from workflowval.schemas import (
     Basis,
+    Decision,
     Finding,
     Label,
     RunResults,
@@ -38,12 +39,28 @@ def _finding_line(finding: Finding) -> str:
     return f"- **{label}**, on {operations}: {finding.message}.{reason}{filed}"
 
 
+def _journey_lines(run: RunResults) -> list[str]:
+    lines = []
+    for review in run.reviews:
+        when = "after the tests" if review.after_tests else "before the tests"
+        for journey in review.missing_journeys:
+            answer = journey.answer
+            if answer is None:
+                outcome = "not answered"
+            elif answer.decision is Decision.ACCEPTED:
+                outcome = f"added as `{answer.workflow_id}`"
+            else:
+                outcome = f"rejected: {answer.reason}"
+            lines.append(f"- {journey.rule} ({journey.user}, {when}): {outcome}.")
+    return lines
+
+
 def _section(title: str, lines: list[str]) -> list[str]:
     return [f"## {title}", "", *lines, ""] if lines else []
 
 
 def _is_problem(test: TestResult) -> bool:
-    return test.status is not TestStatus.PASSED
+    return test.status not in {TestStatus.PASSED, TestStatus.SKIPPED}
 
 
 def render_report(run: RunResults) -> str:
@@ -95,6 +112,7 @@ def render_report(run: RunResults) -> str:
     lines += _section(
         "Mismatches the Reviewer dismissed", [_finding_line(finding) for finding in dismissed]
     )
+    lines += _section("User journeys the Reviewer proposed", _journey_lines(run))
     lines += _section(
         "Operations no workflow calls", [f"- `{op}`" for op in run.uncovered_operations]
     )
@@ -127,6 +145,8 @@ def render_junit(run: RunResults) -> str:
         if test.status in {TestStatus.FAILED, TestStatus.ERROR}:
             label = verdict.label.value if verdict else "unlabeled"
             ET.SubElement(case, "failure", message=f"{label}: {reason}"[:1000])
+        elif test.status is TestStatus.SKIPPED:
+            ET.SubElement(case, "skipped", message="read-only run")
         elif test.status is not TestStatus.PASSED:
             label = verdict.label.value if verdict else test.status.value
             ET.SubElement(case, "skipped", message=f"expected to fail, {label}: {reason}"[:1000])
