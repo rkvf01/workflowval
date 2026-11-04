@@ -7,6 +7,8 @@ pytest tests against a live API, and triages every failure as a test bug, an API
 
 ## Start here
 
+All the project's documents are in the [docs folder](docs/).
+
 - **[Requirements](docs/requirements.md):** what workflowval was built to do.
 - **[Conclusions](docs/conclusions.md):** how it measured up, what helped and what didn't.
 - **[Model comparison](docs/model-comparison.md):** two models on the same benchmark, side by side.
