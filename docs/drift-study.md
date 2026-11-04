@@ -72,4 +72,4 @@ An earlier pass found three problems, all fixed before the results above:
 
 - Three backends, one plan and one low-cost model. Labels weren't all reviewed one by one.
 - The hand checks covered what the runs raised, plus a few paging and token cases, not the whole API.
-- The planned model comparison isn't done yet, so this says nothing about which model is best.
+- This says nothing about which model is best. See `docs/model-comparison.md`.

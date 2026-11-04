@@ -4,9 +4,10 @@ Model-agnostic CLI agent that reads an OpenAPI spec, infers multi-step workflows
 pytest tests against a live API, and triages every failure as a test bug, an API bug or spec drift.
 
 **Status: M4 in progress.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`.
-Requirements are in `workflowreq.md`, decisions in `docs/m0-review.md`, and changes and known limits in
-`docs/m1-notes.md`, `docs/m2-notes.md` and `docs/m3-notes.md`. `docs/drift-study.md` compares three
-implementations of one API, and `docs/model-comparison.md` compares two models.
+See `docs/requirements.md` for what it was built to do, and `docs/conclusions.md` for how that turned out.
+Decisions are in `docs/m0-review.md`, and changes and known limits in `docs/m1-notes.md`, `docs/m2-notes.md` and
+`docs/m3-notes.md`. `docs/drift-study.md` compares three implementations of one API, and
+`docs/model-comparison.md` compares two models.
 
 ## Quickstart
 
