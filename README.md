@@ -3,11 +3,17 @@
 Model-agnostic CLI agent that reads an OpenAPI spec, infers multi-step workflows, writes and runs
 pytest tests against a live API, and triages every failure as a test bug, an API bug or spec drift.
 
-**Status: M4 in progress.** All six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`.
-See `docs/requirements.md` for what it was built to do, and `docs/conclusions.md` for how that turned out.
-Decisions are in `docs/m0-review.md`, and changes and known limits in `docs/m1-notes.md`, `docs/m2-notes.md` and
-`docs/m3-notes.md`. `docs/drift-study.md` compares three implementations of one API, and
-`docs/model-comparison.md` compares two models.
+**Status:** all six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`. A PyPI release is still to come.
+
+## Start here
+
+All the project's documents are in the [docs folder](docs/).
+
+- **[Requirements](docs/requirements.md):** what workflowval was built to do.
+- **[Conclusions](docs/conclusions.md):** how it measured up, what helped and what didn't.
+- **[Model comparison](docs/model-comparison.md):** two models on the same benchmark, side by side.
+- **[Drift study](docs/drift-study.md):** the same tests against three implementations of one API.
+- **Build notes:** decisions in [M0](docs/m0-review.md), then changes and known limits in [M1](docs/m1-notes.md), [M2](docs/m2-notes.md) and [M3](docs/m3-notes.md).
 
 ## Quickstart
 
