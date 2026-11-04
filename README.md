@@ -3,26 +3,24 @@
 Model-agnostic CLI agent that reads an OpenAPI spec, infers multi-step workflows, writes and runs
 pytest tests against a live API, and triages every failure as a test bug, an API bug or spec drift.
 
-**Status:** all six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`. A PyPI release is still to come.
+**Status:** all six commands work: `test`, `plan`, `run`, `drift`, `inspect` and `report`.
 
 ## Start here
 
-All the project's documents are in the [docs folder](docs/).
+All the project's documents are in the [docs folder](https://github.com/rkvf01/workflowval/tree/main/docs).
 
-- **[Requirements](docs/requirements.md):** what workflowval was built to do.
-- **[Conclusions](docs/conclusions.md):** how it measured up, what helped and what didn't.
-- **[Model comparison](docs/model-comparison.md):** two models on the same benchmark, side by side.
-- **[Drift study](docs/drift-study.md):** the same tests against three implementations of one API.
-- **Build notes:** decisions in [M0](docs/m0-review.md), then changes and known limits in [M1](docs/m1-notes.md), [M2](docs/m2-notes.md) and [M3](docs/m3-notes.md).
+- **[Requirements](https://github.com/rkvf01/workflowval/blob/main/docs/requirements.md):** what workflowval was built to do.
+- **[Conclusions](https://github.com/rkvf01/workflowval/blob/main/docs/conclusions.md):** how it measured up, what helped and what didn't.
+- **[Model comparison](https://github.com/rkvf01/workflowval/blob/main/docs/model-comparison.md):** two models on the same benchmark, side by side.
+- **[Drift study](https://github.com/rkvf01/workflowval/blob/main/docs/drift-study.md):** the same tests against three implementations of one API.
+- **Build notes:** decisions in [M0](https://github.com/rkvf01/workflowval/blob/main/docs/m0-review.md), then changes and known limits in [M1](https://github.com/rkvf01/workflowval/blob/main/docs/m1-notes.md), [M2](https://github.com/rkvf01/workflowval/blob/main/docs/m2-notes.md) and [M3](https://github.com/rkvf01/workflowval/blob/main/docs/m3-notes.md).
 
 ## Quickstart
 
-It isn't on PyPI yet, so install from a clone. It needs Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
+It needs Python 3.11 or later.
 
 ```
-git clone <this repo> && cd workflowval
-uv sync
-source .venv/bin/activate
+pip install workflowval
 ```
 
 Then, from the folder where you want the tests written:
@@ -154,7 +152,10 @@ only with a local API, since those bodies may hold real secrets. Everything else
 
 ## Develop
 
+This needs [uv](https://docs.astral.sh/uv/).
+
 ```
+git clone https://github.com/rkvf01/workflowval.git && cd workflowval
 uv sync
 uv run ruff check . && uv run ruff format --check .
 uv run mypy --strict src
