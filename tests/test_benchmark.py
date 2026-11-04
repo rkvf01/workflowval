@@ -333,3 +333,18 @@ def test_a_run_that_failed_at_once_does_not_set_the_price(tmp_path: Path) -> Non
         folder.mkdir()
         (folder / "results.json").write_text(json.dumps({"cost_usd": cost}))
     assert bench.setup_costs(tmp_path) == [1.5]
+
+
+@pytest.mark.parametrize(
+    ("saved", "expected"),
+    [(None, False), ("completed", True), ("max_steps", True), ("model_error", False)],
+)
+def test_resume_skips_only_runs_with_a_usable_result(
+    tmp_path: Path, saved: str | None, expected: bool
+) -> None:
+    if saved:
+        run = tmp_path / "round-2-clean"
+        run.mkdir()
+        (run / "results.json").write_text(json.dumps({"stop_reason": saved}))
+    assert bench.run_is_saved(tmp_path, "clean", 2) is expected
+    assert bench.run_is_saved(tmp_path, "buggy", 2) is False

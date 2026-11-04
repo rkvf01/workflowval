@@ -295,6 +295,12 @@ def setup_costs(folder: Path) -> list[float]:
     return [cost for cost in costs if cost > 0]  # A run that failed at once says nothing of price.
 
 
+def run_is_saved(folder: Path, build: str, round_number: int) -> bool:
+    """Whether this run already has a usable result. A model error gives no valid score."""
+    path = folder / f"round-{round_number}-{build}" / "results.json"
+    return path.is_file() and json.loads(path.read_text())["stop_reason"] != "model_error"
+
+
 def _record(build: str, round_number: int, results: dict[str, Any]) -> None:
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -468,6 +474,7 @@ def main() -> int:
     parser.add_argument(
         "--buggy-only", action="store_true", help="Skip the clean build, for a quick label check"
     )
+    parser.add_argument("--resume", action="store_true", help="Skip runs that are already saved")
     parser.add_argument("--rescore", action="store_true", help="Score saved runs, at no cost")
     args = parser.parse_args()
     labels = json.loads((SEEDED / "labels.json").read_text())
@@ -481,6 +488,9 @@ def main() -> int:
     clean_scores: list[dict[str, Any]] = []
     for number in range(1, args.rounds + 1):
         for build in ("buggy",) if args.buggy_only else ("buggy", "clean"):
+            if args.resume and run_is_saved(folder, build, number):
+                print(f"Skipping {build} round {number}: already saved.")
+                continue
             if not next_run_is_allowed(spent(), args.limit, setup_costs(folder)):
                 print(f"Stopping: another run could pass ${args.limit}. Spent ${sum(spent()):.4f}.")
                 return 3
@@ -507,6 +517,10 @@ def main() -> int:
             else:
                 clean_scores.append(score_clean(results))
                 print(json.dumps(clean_scores[-1]))
+    if args.resume:  # The scores above cover only this call's runs, so score every saved run.
+        rescore(folder, labels)
+        print(f"Total spent, across all calls: ${sum(spent()):.4f}")
+        return 0
     if args.buggy_only:
         print(f"Total spent, across all calls: ${sum(spent()):.4f}")
         return 0
